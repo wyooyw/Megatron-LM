@@ -127,13 +127,13 @@ def _gather_along_first_dim(input_, output_split_sizes=None):
     if output_split_sizes is None:
         dim_size[0] = dim_size[0] * world_size
 
-        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+        output = torch.empty(dim_size, dtype=input_.dtype, device=input_.device)
         torch.distributed._all_gather_base(
             output, input_.contiguous(), group=get_tensor_model_parallel_group()
         )
     else:
         dim_size[0] = sum(output_split_sizes)
-        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+        output = torch.empty(dim_size, dtype=input_.dtype, device=input_.device)
         output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
         torch.distributed.all_gather(
             output_tensor_list, input_, group=get_tensor_model_parallel_group()

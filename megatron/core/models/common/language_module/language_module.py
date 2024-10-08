@@ -12,6 +12,12 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import make_tp_sharded_tensor_for_checkpoint
 
+import os
+use_wyo = int(os.environ.get("USE_WYO", 0))
+if use_wyo:
+    from megatron.core.extensions.wyo.model.submodule.vocab_parallel_cross_entropy import vocab_parallel_cross_entropy
+else:
+    from megatron.core.tensor_parallel.cross_entropy import vocab_parallel_cross_entropy
 
 class LanguageModule(MegatronModule):
     """Base language module that has common helper functions used across GPT, BERT etc.
@@ -38,7 +44,7 @@ class LanguageModule(MegatronModule):
         if self.config.cross_entropy_loss_fusion:
             loss = fused_vocab_parallel_cross_entropy(logits, labels)
         else:
-            loss = tensor_parallel.vocab_parallel_cross_entropy(logits, labels)
+            loss = vocab_parallel_cross_entropy(logits, labels)
 
         # [s b] => [b, s]
         loss = loss.transpose(0, 1).contiguous()

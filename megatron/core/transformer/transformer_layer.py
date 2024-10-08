@@ -271,7 +271,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
                 otherwise None.
         """
 
-        torch.cuda.nvtx.range_push("TransformerLayer")
 
         # Residual connection.
         residual = hidden_states
@@ -280,7 +279,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         input_layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
-        torch.cuda.nvtx.range_push("self_attn")
+
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
@@ -288,7 +287,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             rotary_pos_emb=rotary_pos_emb,
             packed_seq_params=packed_seq_params,
         )
-        torch.cuda.nvtx.range_pop()
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
@@ -328,9 +326,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
         # MLP.
-        torch.cuda.nvtx.range_push("mlp")
         mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
-        torch.cuda.nvtx.range_pop()
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
@@ -349,7 +345,6 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
 
-        torch.cuda.nvtx.range_pop()
 
         # CUDA graph requires returned values to be Tensors
         if self.config.external_cuda_graph and self.training:

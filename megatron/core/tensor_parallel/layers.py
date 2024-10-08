@@ -233,7 +233,8 @@ class VocabParallelEmbedding(torch.nn.Module):
             input_mask = (input_ < self.vocab_start_index) | (input_ >= self.vocab_end_index)
             # Mask the input.
             masked_input = input_.clone() - self.vocab_start_index
-            masked_input[input_mask] = 0
+            # masked_input[input_mask] = 0
+            masked_input = torch.where(input_mask, torch.zeros_like(masked_input), masked_input)
         else:
             masked_input = input_
         # Get the embeddings.
@@ -244,7 +245,10 @@ class VocabParallelEmbedding(torch.nn.Module):
             output_parallel = F.embedding(masked_input, self.weight)
         # Mask the output embedding.
         if self.tensor_model_parallel_size > 1:
-            output_parallel[input_mask, :] = 0.0
+            t1 = input_mask.unsqueeze(2) # [x, y, 1]
+            t2 = t1.expand(*output_parallel.shape) # [x, y, z]
+            output_parallel = torch.where(t2, torch.zeros_like(output_parallel), output_parallel)
+
 
         if self.reduce_scatter_embeddings:
             # Data format change to avoid explicit tranposes : [b s h] --> [s b h].
