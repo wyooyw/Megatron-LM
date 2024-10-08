@@ -37,136 +37,207 @@ from megatron.core.extensions.wyo.model.communicate.communicate import (
 )
 from megatron.core.extensions.wyo.model.operator.layer_norm import layer_norm, layer_norm_bwd
 
-@torch.library.custom_op("wrapped_ops::layernorm_column_parallel_linear", mutates_args=())
-def layernorm_column_parallel_linear_sp(
-    inp: torch.Tensor,
-    fc_weight: torch.Tensor,
-    # fc_bias: torch.Tensor,
+# @torch.library.custom_op("wrapped_ops::layernorm_column_parallel_linear", mutates_args=())
+# def layernorm_column_parallel_linear_sp(
+#     inp: torch.Tensor,
+#     fc_weight: torch.Tensor,
+#     # fc_bias: torch.Tensor,
 
-    ln_weight: torch.Tensor,
-    ln_bias: torch.Tensor,
-    ln_normalized_shape: int,
-    ln_eps: float,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+#     ln_weight: torch.Tensor,
+#     ln_bias: torch.Tensor,
+#     ln_normalized_shape: int,
+#     ln_eps: float,
+# ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
-    # step 1: layernorm
-    ln_out, ln_mean, ln_invvar = layer_norm(
-        inp,
-        ln_weight,
-        ln_bias,
-        normalized_shape=ln_normalized_shape,
-        eps=ln_eps,
-        memory_efficient=True
-    )
+#     # step 1: layernorm
+#     ln_out, ln_mean, ln_invvar = layer_norm(
+#         inp,
+#         ln_weight,
+#         ln_bias,
+#         normalized_shape=ln_normalized_shape,
+#         eps=ln_eps,
+#         memory_efficient=True
+#     )
 
-    # step 2: all-gather
-    ag_out = gather_along_first_dim_in_tp_group(ln_out)
+#     # step 2: all-gather
+#     ag_out = gather_along_first_dim_in_tp_group(ln_out)
 
-    # step 3: gemm
-    fc_out = torch.matmul(ag_out, fc_weight.t())
+#     # step 3: gemm
+#     fc_out = torch.matmul(ag_out, fc_weight.t())
     
-    return fc_out, ln_out, ln_mean, ln_invvar
+#     return fc_out, ln_out, ln_mean, ln_invvar
 
-@layernorm_column_parallel_linear_sp.register_fake
-def layernorm_column_parallel_linear_sp_abstract(
-    input: torch.Tensor,
-    fc_weight: torch.Tensor,
-    # fc_bias: torch.Tensor,
+# @layernorm_column_parallel_linear_sp.register_fake
+# def layernorm_column_parallel_linear_sp_abstract(
+#     input: torch.Tensor,
+#     fc_weight: torch.Tensor,
+#     # fc_bias: torch.Tensor,
 
-    ln_weight: torch.Tensor,
-    ln_bias: torch.Tensor,
-    ln_normalized_shape: int,
-    ln_eps: float,
-):
-    out_feature, in_feature = fc_weight.shape
-    tp_size = get_tensor_model_parallel_world_size()
+#     ln_weight: torch.Tensor,
+#     ln_bias: torch.Tensor,
+#     ln_normalized_shape: int,
+#     ln_eps: float,
+# ):
+#     out_feature, in_feature = fc_weight.shape
+#     tp_size = get_tensor_model_parallel_world_size()
 
-    output_shape = list(input.size())
-    output_shape[0] *= tp_size
-    output_shape[-1] = out_feature
-    output = torch.empty(
-        output_shape,
-        dtype=input.dtype,
-        device=input.device,
-        memory_format=torch.contiguous_format,
-    )
+#     output_shape = list(input.size())
+#     output_shape[0] *= tp_size
+#     output_shape[-1] = out_feature
+#     output = torch.empty(
+#         output_shape,
+#         dtype=input.dtype,
+#         device=input.device,
+#         memory_format=torch.contiguous_format,
+#     )
 
-    ln_out = torch.empty(
-        list(input.size()),
-        dtype=input.dtype,
-        device=input.device,
-        memory_format=torch.contiguous_format,
-    )
+#     ln_out = torch.empty(
+#         list(input.size()),
+#         dtype=input.dtype,
+#         device=input.device,
+#         memory_format=torch.contiguous_format,
+#     )
 
-    # TODO: force fp32?
-    mean_dim = len(input.shape) - 1
-    mean = input.new_empty(*input.shape[:mean_dim])
-    invvar = input.new_empty(*input.shape[:mean_dim])
+#     # TODO: force fp32?
+#     mean_dim = len(input.shape) - 1
+#     mean = input.new_empty(*input.shape[:mean_dim])
+#     invvar = input.new_empty(*input.shape[:mean_dim])
     
-    return output, ln_out, mean, invvar
+#     return output, ln_out, mean, invvar
 
-def _backward_layernorm_column_parallel_linear_sp(ctx, d_fc_out, _d_ln_out, _d_ln_mean, _d_ln_invvar):
-    """
-    This function will generate at least 5 ops in fx.graph:
-        allgather
-        matmul
-        matmul
-        reduce_scatter
-        layernorm_bwd
-    """
+# def _backward_layernorm_column_parallel_linear_sp(ctx, d_fc_out, _d_ln_out, _d_ln_mean, _d_ln_invvar):
+#     """
+#     This function will generate at least 5 ops in fx.graph:
+#         allgather
+#         matmul
+#         matmul
+#         reduce_scatter
+#         layernorm_bwd
+#     """
     
-    fc_weight, ln_out, ln_weight, ln_bias, ln_mean, ln_invvar = ctx.saved_tensors
+#     fc_weight, ln_out, ln_weight, ln_bias, ln_mean, ln_invvar = ctx.saved_tensors
 
-    # re-all-gather 
-    inp_total = gather_along_first_dim_in_tp_group(ln_out)
+#     # re-all-gather 
+#     inp_total = gather_along_first_dim_in_tp_group(ln_out)
 
-    # backward of fc
-    # dI = dO * W
-    d_fc_inp = torch.matmul(d_fc_out, fc_weight)
-    # dW = dO^T * I
-    d_fc_out = d_fc_out.reshape(-1, d_fc_out.shape[-1])
-    inp_total = inp_total.reshape(-1, inp_total.shape[-1])
-    d_fc_weight = torch.matmul(d_fc_out.t(), inp_total)
+#     # backward of fc
+#     # dI = dO * W
+#     d_fc_inp = torch.matmul(d_fc_out, fc_weight)
+#     # dW = dO^T * I
+#     d_fc_out = d_fc_out.reshape(-1, d_fc_out.shape[-1])
+#     inp_total = inp_total.reshape(-1, inp_total.shape[-1])
+#     d_fc_weight = torch.matmul(d_fc_out.t(), inp_total)
 
-    # backward of all-gather(reduce-scatter)
-    d_ln_out = reduce_scatter_along_first_dim_in_tp_group(d_fc_inp)
+#     # backward of all-gather(reduce-scatter)
+#     d_ln_out = reduce_scatter_along_first_dim_in_tp_group(d_fc_inp)
 
-    # backward of layernorm
-    d_ln_input, d_ln_weight, d_ln_bias = layer_norm_bwd(
-        d_ln_out,
-        ln_out,
-        ln_weight,
-        ln_bias,
-        ln_mean,
-        ln_invvar,
-        ctx.ln_normalized_shape,
-        ctx.ln_eps,
-        True # ctx.ln_memory_efficient
-    )
+#     # backward of layernorm
+#     d_ln_input, d_ln_weight, d_ln_bias = layer_norm_bwd(
+#         d_ln_out,
+#         ln_out,
+#         ln_weight,
+#         ln_bias,
+#         ln_mean,
+#         ln_invvar,
+#         ctx.ln_normalized_shape,
+#         ctx.ln_eps,
+#         True # ctx.ln_memory_efficient
+#     )
     
-    return d_ln_input, d_fc_weight, d_ln_weight, d_ln_bias, None, None
+#     return d_ln_input, d_fc_weight, d_ln_weight, d_ln_bias, None, None
 
-def setup_context(ctx, inputs, output):
-    (
-        input,
-        fc_weight,
+# def setup_context(ctx, inputs, output):
+#     (
+#         input,
+#         fc_weight,
 
-        ln_weight,
-        ln_bias,
-        ln_normalized_shape,
-        ln_eps,
-    ) = inputs
+#         ln_weight,
+#         ln_bias,
+#         ln_normalized_shape,
+#         ln_eps,
+#     ) = inputs
     
-    (fc_output, ln_out, ln_mean, ln_invvar) = output
+#     (fc_output, ln_out, ln_mean, ln_invvar) = output
 
-    ctx.ln_normalized_shape = ln_normalized_shape
-    ctx.ln_eps = ln_eps
+#     ctx.ln_normalized_shape = ln_normalized_shape
+#     ctx.ln_eps = ln_eps
     
-    ctx.save_for_backward(fc_weight, ln_out, ln_weight, ln_bias, None, ln_invvar)
+#     ctx.save_for_backward(fc_weight, ln_out, ln_weight, ln_bias, None, ln_invvar)
     
 
-layernorm_column_parallel_linear_sp.register_autograd(_backward_layernorm_column_parallel_linear_sp, setup_context=setup_context)
+# layernorm_column_parallel_linear_sp.register_autograd(_backward_layernorm_column_parallel_linear_sp, setup_context=setup_context)
 
+class LayernormColumnParallelLinearSp(torch.autograd.Function):
+    """See linear_with_grad_accumulation_and_async_allreduce"""
+
+    @staticmethod
+    def forward(
+        ctx,
+        inp: torch.Tensor,
+        fc_weight: torch.Tensor,
+        # fc_bias: torch.Tensor,
+
+        ln_weight: torch.Tensor,
+        ln_bias: torch.Tensor,
+        ln_normalized_shape: int,
+        ln_eps: float
+    ):
+        # step 1: layernorm
+        ln_out, ln_mean, ln_invvar = layer_norm(
+            inp,
+            ln_weight,
+            ln_bias,
+            normalized_shape=ln_normalized_shape,
+            eps=ln_eps,
+            memory_efficient=True
+        )
+
+        # step 2: all-gather
+        ag_out = gather_along_first_dim_in_tp_group(ln_out)
+
+        # step 3: gemm
+        fc_out = torch.matmul(ag_out, fc_weight.t())
+
+        ctx.ln_normalized_shape = ln_normalized_shape
+        ctx.ln_eps = ln_eps
+        ctx.save_for_backward(fc_weight, ln_out, ln_weight, ln_bias, ln_mean, ln_invvar)
+
+        return fc_out
+    
+    @staticmethod
+    def backward(
+        ctx, d_fc_out
+    ):
+        fc_weight, ln_out, ln_weight, ln_bias, ln_mean, ln_invvar = ctx.saved_tensors
+
+        # re-all-gather 
+        inp_total = gather_along_first_dim_in_tp_group(ln_out)
+
+        # backward of fc
+        # dI = dO * W
+        d_fc_inp = torch.matmul(d_fc_out, fc_weight)
+        # dW = dO^T * I
+        d_fc_out = d_fc_out.reshape(-1, d_fc_out.shape[-1])
+        inp_total = inp_total.reshape(-1, inp_total.shape[-1])
+        d_fc_weight = torch.matmul(d_fc_out.t(), inp_total)
+
+        # backward of all-gather(reduce-scatter)
+        d_ln_out = reduce_scatter_along_first_dim_in_tp_group(d_fc_inp)
+
+        # backward of layernorm
+        d_ln_input, d_ln_weight, d_ln_bias = layer_norm_bwd(
+            d_ln_out,
+            ln_out,
+            ln_weight,
+            ln_bias,
+            ln_mean,
+            ln_invvar,
+            ctx.ln_normalized_shape,
+            ctx.ln_eps,
+            True # ctx.ln_memory_efficient
+        )
+        
+        return d_ln_input, d_fc_weight, d_ln_weight, d_ln_bias, None, None
 
 class LayerNormColumnParallelLinear(TransformerEngineBaseModule):
     def __init__(
@@ -259,14 +330,23 @@ class LayerNormColumnParallelLinear(TransformerEngineBaseModule):
     
     def forward(self, x):
         # torch.cuda.nvtx.range_push("wyo LayerNormColumnParallelLinear")
-        out, _, _, _ = layernorm_column_parallel_linear_sp(
-                x,
-                fc_weight=self.weight,
+        # out, _, _, _ = layernorm_column_parallel_linear_sp(
+        #         x,
+        #         fc_weight=self.weight,
 
-                ln_weight=self.layer_norm_weight,
-                ln_bias=self.layer_norm_bias,
-                ln_normalized_shape=x.shape[-1],
-                ln_eps=self.config.layernorm_epsilon ,
+        #         ln_weight=self.layer_norm_weight,
+        #         ln_bias=self.layer_norm_bias,
+        #         ln_normalized_shape=x.shape[-1],
+        #         ln_eps=self.config.layernorm_epsilon ,
+        # )
+        out = LayernormColumnParallelLinearSp.apply(
+            x,
+            self.weight,
+
+            self.layer_norm_weight,
+            self.layer_norm_bias,
+            x.shape[-1],
+            self.config.layernorm_epsilon
         )
         # torch.cuda.nvtx.range_pop()
         output_bias = None

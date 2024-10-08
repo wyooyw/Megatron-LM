@@ -5,18 +5,21 @@ from megatron.core import parallel_state
 def no_setup(ctx, inputs, output):
     pass
 
+HANDLES = dict()
 
 @torch.library.custom_op("wrapped_ops::gather_along_first_dim_in_tp_group", mutates_args=[])
-def gather_along_first_dim_in_tp_group(_inp: torch.Tensor) -> torch.Tensor:
-    output, _ = _gather_along_first_dim(
+def gather_along_first_dim_in_tp_group(_inp: torch.Tensor, async_op: bool=False) -> torch.Tensor:
+    output, handle = _gather_along_first_dim(
         _inp, 
         process_group=parallel_state.get_tensor_model_parallel_group(),
-        async_op=False
+        async_op=async_op
     )
+    if async_op:
+        HANDLES[output] = handle
     return output
 
 @gather_along_first_dim_in_tp_group.register_fake
-def gather_along_first_dim_in_tp_group_abstract(_inp: torch.Tensor) -> torch.Tensor:
+def gather_along_first_dim_in_tp_group_abstract(_inp: torch.Tensor, async_op: bool=False) -> torch.Tensor:
     world_size = parallel_state.get_tensor_model_parallel_world_size()
     dim_size = list(_inp.size())
     dim_size[0] = dim_size[0] * world_size
@@ -24,26 +27,52 @@ def gather_along_first_dim_in_tp_group_abstract(_inp: torch.Tensor) -> torch.Ten
 
 def _backward_gather_along_first_dim_in_tp_group(ctx, dout):
     din = reduce_scatter_along_first_dim_in_tp_group(dout)
-    return din
+    return din, None
 
 gather_along_first_dim_in_tp_group.register_autograd(_backward_gather_along_first_dim_in_tp_group, setup_context=no_setup)
 
+class GatherAlongFirstDimInTpGroup(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        _inp: torch.Tensor
+    ):
+        output, _ = _gather_along_first_dim(
+            _inp, 
+            process_group=parallel_state.get_tensor_model_parallel_group(),
+            async_op=False
+        )
+        return output
+    
+    @staticmethod
+    def backward(
+        ctx,
+        dout: torch.Tensor
+    ):
+        din = _reduce_scatter_along_first_dim(
+            dout,
+            process_group=parallel_state.get_tensor_model_parallel_group(),
+            async_op=False
+        )
+        return din
 
 """
 Reduce-Scatter along first dim in tp group
 """
 
 @torch.library.custom_op("wrapped_ops::reduce_scatter_along_first_dim_in_tp_group", mutates_args=[])
-def reduce_scatter_along_first_dim_in_tp_group(_inp: torch.Tensor) -> torch.Tensor:
-    output, _ = _reduce_scatter_along_first_dim(
+def reduce_scatter_along_first_dim_in_tp_group(_inp: torch.Tensor, async_op: bool=False) -> torch.Tensor:
+    output, handle = _reduce_scatter_along_first_dim(
         _inp, 
         process_group=parallel_state.get_tensor_model_parallel_group(),
-        async_op=False
+        async_op=async_op
     )
+    if async_op:
+        HANDLES[output] = handle
     return output
 
 @reduce_scatter_along_first_dim_in_tp_group.register_fake
-def reduce_scatter_along_first_dim_in_tp_group_abstract(_inp: torch.Tensor) -> torch.Tensor:
+def reduce_scatter_along_first_dim_in_tp_group_abstract(_inp: torch.Tensor, async_op: bool=False) -> torch.Tensor:
     world_size = parallel_state.get_tensor_model_parallel_world_size()
     dim_size = list(_inp.size())
     dim_size[0] = dim_size[0] // world_size
@@ -51,7 +80,7 @@ def reduce_scatter_along_first_dim_in_tp_group_abstract(_inp: torch.Tensor) -> t
 
 def _backward_reduce_scatter_along_first_dim_in_tp_group(ctx, dout):
     din = gather_along_first_dim_in_tp_group(dout)
-    return din
+    return din, None
 
 reduce_scatter_along_first_dim_in_tp_group.register_autograd(_backward_reduce_scatter_along_first_dim_in_tp_group, setup_context=no_setup)
 
@@ -71,6 +100,16 @@ def _backward_scatter_along_first_dim_in_tp_group(ctx, dout):
     return gather_along_first_dim_in_tp_group(dout)
 
 scatter_along_first_dim_in_tp_group.register_autograd(_backward_scatter_along_first_dim_in_tp_group, setup_context=no_setup)
+
+"""
+Wait
+"""
+
+def wait_tensor(tensor: torch.Tensor) -> None:
+    handle = HANDLES[tensor]
+    handle.wait()
+    del HANDLES[tensor]
+    return tensor
 
 """
 Basic functions
@@ -131,7 +170,7 @@ def _reduce_scatter_along_first_dim(
 
     dim_size[0] = dim_size[0] // world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+    output = torch.empty(dim_size, dtype=input_.dtype, device=input_.device)
     handle = torch.distributed.reduce_scatter_tensor(
         output, input_.contiguous(), group=process_group, async_op=async_op
     )
