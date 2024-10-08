@@ -17,7 +17,11 @@ from megatron.core.utils import (
     get_model_type,
     get_model_xattn,
 )
-
+import os
+USE_WYO = int(os.environ.get("USE_WYO", 0))
+USE_WYO_SCHEDULER = int(os.environ.get("USE_WYO_SCHEDULER", 0))
+if USE_WYO_SCHEDULER:
+    assert USE_WYO
 # Types
 Shape = Union[List[int], torch.Size]
 
@@ -108,6 +112,10 @@ def get_forward_backward_func():
             forward_backward_func = forward_backward_pipelining_without_interleaving
     else:
         forward_backward_func = forward_backward_no_pipelining
+
+    if USE_WYO_SCHEDULER:
+        forward_backward_func = forward_backward_wyo
+
     return forward_backward_func
 
 
@@ -447,6 +455,7 @@ def forward_backward_no_pipelining(
     total_num_tokens = torch.zeros([], dtype=torch.int, device="cuda")
     with no_sync_func():
         for i in range(num_microbatches - 1):
+            torch.cuda.nvtx.range_push("forward")
             output_tensor, num_tokens = forward_step(
                 forward_step_func,
                 data_iterator,
@@ -459,12 +468,15 @@ def forward_backward_no_pipelining(
                 is_first_microbatch=check_first_val_step(first_val_step, forward_only, i == 0),
                 current_microbatch=i,
             )
+            torch.cuda.nvtx.range_pop()
+            torch.cuda.nvtx.range_push("backward")
             total_num_tokens += num_tokens.item()
             if not forward_only:
                 backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config)
-
+            torch.cuda.nvtx.range_pop()
     # Run computation for last microbatch out of context handler (want to
     # synchronize gradients).
+    torch.cuda.nvtx.range_push("forward")
     output_tensor, num_tokens = forward_step(
         forward_step_func,
         data_iterator,
@@ -479,11 +491,12 @@ def forward_backward_no_pipelining(
         ),
         current_microbatch=num_microbatches - 1,
     )
+    torch.cuda.nvtx.range_pop()
     total_num_tokens += num_tokens.item()
-
+    torch.cuda.nvtx.range_push("backward")
     if not forward_only:
         backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config)
-
+    torch.cuda.nvtx.range_pop()
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
         # data parallelism and layernorm all-reduce for sequence parallelism).
@@ -495,6 +508,32 @@ def forward_backward_no_pipelining(
         config.timers('forward-backward').stop()
 
     return forward_data_store
+
+# def graph_capture_backend(gm, sample_inputs):
+#     def my_compiler(gm, sample_inputs):
+#         print("AOTAutograd produced a fx Graph in Aten IR")
+#         # keeper.add_graph(gm.graph)
+#         # gm.print_readable()
+#         if parallel_state.get_tensor_model_parallel_rank()==0:
+#             verbose_python_code = gm.graph.python_code(
+#                 root_module="self", verbose=True
+#             )
+#             print(f"\n--------------------\n{verbose_python_code.src}\n--------------------\n")
+#         # exit()
+#         return gm.forward
+
+#     # params = {
+#     #     **dict(gm.named_parameters(remove_duplicate=False)),
+#     #     **dict(gm.named_buffers(remove_duplicate=False)),
+#     # }
+#     # params_flat, params_spec = pytree.tree_flatten(params)
+#     # keeper.params_flat = params_flat
+#     # assert len(keeper.params_flat) > 0
+    
+#     # Invoke AOTAutograd
+#     return aot_module_simplified(gm, sample_inputs, fw_compiler=my_compiler)
+
+
 
 
 def clear_embedding_activation_buffer(config, model):
@@ -1535,6 +1574,184 @@ def forward_backward_pipelining_without_interleaving(
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
         # data parallelism, layernorm all-reduce for sequence parallelism, and
         # embedding all-reduce for pipeline parallelism).
+        config.finalize_model_grads_func(
+            [model], total_num_tokens if config.calculate_per_token_loss else None
+        )
+
+    if config.timers is not None:
+        config.timers('forward-backward').stop()
+
+    return forward_data_store
+
+
+
+import os
+from functools import partial
+from contextlib import nullcontext
+import inspect
+from megatron.training import get_args
+import torch.utils._pytree as pytree
+from torch._functorch.aot_autograd import aot_module_simplified
+from megatron.training import get_timers
+from megatron.core.extensions.wyo.graph.ga_runner import GARunner
+from megatron.training.utils import (
+    get_batch_on_this_cp_rank,
+    get_batch_on_this_tp_rank,
+)
+from megatron.core import mpu
+def get_batch(data_iterator):
+    """Generate a batch."""
+
+    # TODO: this is pretty hacky, find a better way
+    if (not mpu.is_pipeline_first_stage()) and (not mpu.is_pipeline_last_stage()):
+        return None, None, None, None, None
+
+    # get batches based on the TP rank you are on
+    batch = get_batch_on_this_tp_rank(data_iterator)
+
+    # slice batch along sequence dimension for context parallelism
+    batch = get_batch_on_this_cp_rank(batch)
+
+    return batch.values()
+
+def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
+    """Loss function.
+
+    Args:
+        loss_mask (torch.Tensor): Used to mask out some portions of the loss
+        output_tensor (torch.Tensor): The tensor with the losses
+
+    Returns:
+        the loss scalar for this micro-batch
+        the number of non-padded tokens in this microbatch
+        a dict containing reporting metrics on the loss and number of tokens across
+            the data parallel ranks
+    """
+    args = get_args()
+
+    losses = output_tensor.float()
+    loss_mask = loss_mask.view(-1).float()
+    total_tokens = loss_mask.sum()
+    loss = torch.cat([torch.sum(losses.view(-1) * loss_mask).view(1), total_tokens.view(1)])
+
+    if args.context_parallel_size > 1:
+        torch.distributed.all_reduce(loss, group=mpu.get_context_parallel_group())
+
+    # Check individual rank losses are not NaN prior to DP all-reduce.
+    if args.check_for_nan_in_loss_and_grad:
+        global_rank = torch.distributed.get_rank()
+        assert not loss[0].isnan(), (
+            f'Rank {global_rank}: found NaN in local forward loss calculation. '
+            f'Device: {torch.cuda.current_device()}, node: {os.uname()[1]}'
+        )
+
+    # Reduce loss for logging.
+    reporting_loss = loss.clone().detach()
+    torch.distributed.all_reduce(reporting_loss, group=mpu.get_data_parallel_group())
+
+    local_num_tokens = loss[1].clone().detach().to(torch.int)
+    return (
+        loss[0] * args.context_parallel_size,
+        local_num_tokens,
+        {'lm loss': (reporting_loss[0], reporting_loss[1])},
+    )
+
+def forward_backward_wyo(
+    *,
+    forward_step_func,
+    data_iterator: Union[Iterator, List[Iterator]],
+    model: Union[torch.nn.Module, List[torch.nn.Module]],
+    num_microbatches: int,
+    seq_length: int,  # unused
+    micro_batch_size: int,  # unused
+    decoder_seq_length: int = None,  # unused
+    forward_only: bool = False,
+    collect_non_loss_data: bool = False,
+    first_val_step: bool = None,
+):
+    """Run forward and backward passes with no pipeline parallelism
+    (no inter-stage communication).
+
+    Returns dictionary with losses.
+
+
+    See get_forward_backward_func() for argument details
+    """
+
+    if isinstance(model, list):
+        assert len(model) == 1, "non-pipeline-parallel schedule does not support model chunking"
+        model = model[0]
+    if isinstance(data_iterator, list):
+        assert (
+            len(data_iterator) == 1
+        ), "non-pipeline-parallel schedule does not support model chunking"
+        data_iterator = data_iterator[0]
+
+    config = get_model_config(model)
+    if config.timers is not None:
+        config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
+
+    no_sync_func = config.no_sync_func
+    if no_sync_func is None:
+        no_sync_func = contextlib.nullcontext
+
+    model_type = get_model_type(model)
+
+    forward_data_store = []
+    input_tensor, output_tensor_grad = None, None
+    total_num_tokens = torch.zeros([], dtype=torch.int, device="cuda")
+
+    timers = get_timers()
+    timers('batch-generator', log_level=2).start()
+    input_micro_batches = []
+    loss_masks = []
+    for i in range(num_microbatches):
+        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
+                data_iterator)
+        input_micro_batches.append((tokens, position_ids, labels))
+        loss_masks.append(loss_mask)
+    timers('batch-generator').stop()
+    
+    if not hasattr(model, "_fused_runner"):
+        print("create GARunner")
+        fused_runner = GARunner(
+            model, 
+            n_ga=num_microbatches, 
+            example_args=(tokens, position_ids, attention_mask, None, labels, None, None, None, None), 
+            example_kwargs={},
+            n_forward_input=3,
+            n_forward_output=1,
+        )
+        model._fused_runner = fused_runner
+    
+    fused_runner = model._fused_runner
+    
+    # attention_mask is not used; None is not used.
+    forward_outputs = fused_runner.run(input_micro_batches)
+
+    assert len(forward_outputs)==len(loss_masks)
+    for output_tensor, loss_mask in zip(forward_outputs, loss_masks):
+        if not collect_non_loss_data:
+            outputs = loss_func(loss_mask, output_tensor)
+            if len(outputs) == 3:
+                output_tensor, num_tokens, loss_reduced = outputs
+                if not config.calculate_per_token_loss:
+                    output_tensor /= num_tokens
+                    output_tensor /= num_microbatches
+            else:
+                # preserve legacy loss averaging behavior (ie, over the number of microbatches)
+                assert len(outputs) == 2
+                output_tensor, loss_reduced = outputs
+                output_tensor /= num_microbatches
+            forward_data_store.append(loss_reduced)
+        else:
+            data = loss_func(loss_mask, output_tensor, non_loss_data=True)
+            forward_data_store.append(data)
+
+
+    if config.finalize_model_grads_func is not None and not forward_only:
+        # Finalize model grads (perform full grad all-reduce / reduce-scatter for
+        # data parallelism and layernorm all-reduce for sequence parallelism).
         config.finalize_model_grads_func(
             [model], total_num_tokens if config.calculate_per_token_loss else None
         )
