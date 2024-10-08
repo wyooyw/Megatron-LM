@@ -143,7 +143,7 @@ class BakwardBackwardOutputs:
 
 
 class ModelArgsAndReturnsManager:
-    def __init__(self, model, params_flat, n_model_outputs, n_model_inputs):
+    def __init__(self, model, params_flat, n_model_inputs, n_model_outputs):
         self.model = model
         self.params_flat = params_flat
         self.n_params = len(self.params_flat)
