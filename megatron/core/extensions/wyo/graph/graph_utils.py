@@ -11,6 +11,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 
 # from wrapped_ops.dist import all_reduce, async_all_reduce, wait
 from megatron.core.extensions.wyo.model.operator.weight_update import grad_update
+from megatron.core.extensions.wyo.graph.utils import print_rank_0
 # from wrapped_ops.multi_out import mul_and_add
 # from wrapped_ops.flash_attn import flash_attn
 import numpy as np
@@ -85,14 +86,14 @@ def merge_overlap_comm_greedy(graph0, graph1):
         if node.op == "call_function":
             target = node.target
             fn_name = getattr(target, "__name__")
-            return fn_name in ["async_all_reduce"]
+            return fn_name in ["all_reduce.default", "gather_along_first_dim_in_tp_group.default", "reduce_scatter_along_first_dim_in_tp_group.default"]
         return False
 
     def _is_wait(node):
         if node.op == "call_function":
             target = node.target
             fn_name = getattr(target, "__name__")
-            return fn_name == "wait"
+            return fn_name in ["wait_tensor", "wait_tensor.default"]
         return False
 
     def _is_output(node):
@@ -107,7 +108,9 @@ def merge_overlap_comm_greedy(graph0, graph1):
     while i0 < n_nodes_0 - 1 and i1 < n_nodes_1 - 1:
         if (_is_compute(nodes0[i0])) and (_is_compute(nodes1[i1])):
             # add graph 0's node to fused_graph until meet comm
+            print_rank_0(f"both compute.")
             while _is_compute(nodes0[i0]):
+                print_rank_0(f"    add nodes0[{i0}]={nodes0[i0]}")
                 _add_node_to(nodes0[i0], fused_graph, value_remap)
                 i0 += 1
 
@@ -116,12 +119,15 @@ def merge_overlap_comm_greedy(graph0, graph1):
 
             assert _is_async_comm(nodes0[i0])
             assert _is_wait(nodes0[i0 + 1])
-
+            print_rank_0(f"nodes0 is comm, nodes1 is compute")
             _add_node_to(nodes0[i0], fused_graph, value_remap)
+            print_rank_0(f"    add nodes0[{i0}]={nodes0[i0]}")
             while _is_compute(nodes1[i1]):
                 _add_node_to(nodes1[i1], fused_graph, value_remap)
+                print_rank_0(f"    add nodes1[{i1}]={nodes1[i1]}")
                 i1 += 1
             _add_node_to(nodes0[i0 + 1], fused_graph, value_remap)
+            print_rank_0(f"    add nodes0[{i0+1}]={nodes0[i0+1]}")
             i0 = i0 + 2
 
         elif _is_compute(nodes0[i0]):
@@ -129,17 +135,30 @@ def merge_overlap_comm_greedy(graph0, graph1):
 
             assert _is_async_comm(nodes1[i1])
             assert _is_wait(nodes1[i1 + 1])
+            print_rank_0(f"nodes0 is compute, nodes1 is comm")
 
             _add_node_to(nodes1[i1], fused_graph, value_remap)
+            print_rank_0(f"    add nodes1[{i1}]={nodes1[i1]}")
             while _is_compute(nodes0[i0]):
                 _add_node_to(nodes0[i0], fused_graph, value_remap)
+                print_rank_0(f"    add nodes0[{i0}]={nodes0[i0]}")
                 i0 += 1
             _add_node_to(nodes1[i1 + 1], fused_graph, value_remap)
+            print_rank_0(f"    add nodes1[{i1+1}]={nodes1[i1+1]}")
             i1 = i1 + 2
 
         else:
+            print_rank_0(f"both are comm.")
             # Both are communication. This should not happen?
-            assert False, "Not implement yet."
+
+            assert _is_async_comm(nodes0[i0])
+            assert _is_wait(nodes0[i0 + 1])
+            _add_node_to(nodes0[i0], fused_graph, value_remap)
+            print_rank_0(f"    add nodes0[{i0}]={nodes0[i0]}")
+            _add_node_to(nodes0[i0 + 1], fused_graph, value_remap)
+            print_rank_0(f"    add nodes0[{i0+1}]={nodes0[i0+1]}")
+            
+            i0 = i0 + 2
 
     # Two case here: i0 point to output0, or i1 point to output 1
     if i0 == (n_nodes_0 - 1):

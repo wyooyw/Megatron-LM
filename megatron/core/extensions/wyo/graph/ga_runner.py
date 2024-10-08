@@ -26,6 +26,7 @@ from megatron.core.extensions.wyo.graph.graph_utils import (
     merge_overlap_comm_greedy,
     param_grad_update,
 )
+from megatron.core.extensions.wyo.graph.passes.comm_sync_to_async import comm_sync_to_async
 from megatron.core.extensions.wyo.graph.utils import is_rank_0, print_graph_rank_0, print_rank_0, seed_everything
 # from wrapped_ops.dist import all_reduce
 # from simple_models import Attention, MultiAttentionModel, SimpleModel
@@ -33,11 +34,11 @@ from megatron.core.extensions.wyo.graph.utils import is_rank_0, print_graph_rank
 # from passes.replace_add import replace_add
 
 class GARunner:
-    def __init__(self, model, n_ga, example_args, example_kwargs):
+    def __init__(self, model, n_ga, example_args, example_kwargs, n_forward_input, n_forward_output):
         self.n_ga = n_ga
         self.model = model
-        self.n_forward_input = 1
-        self.n_forward_output = 1
+        self.n_forward_input = n_forward_input
+        self.n_forward_output = n_forward_output
 
         self.example_args = example_args
         self.example_kwargs = example_kwargs
@@ -118,13 +119,19 @@ class GARunner:
         self.forward_graph = keeper.forward_graph
         self.backward_graph = keeper.backward_graph
         # print_rank_0(f"before: \n{self.forward_graph}\n")
-        # allreduce_sync_to_async(self.forward_graph)
+        comm_sync_to_async(self.forward_graph)
         # print_rank_0(f"after: \n{self.forward_graph}\n")
-        # allreduce_sync_to_async(self.backward_graph)
+        comm_sync_to_async(self.backward_graph)
         param_grad_update(self.backward_graph, list(range(len(self.params_flat))))
         # print_rank_0(f"\nafter param_grad_update: \n{self.backward_graph}\n")
-
-        self.fused_bwd_fwd_graph = merge_naive(self.backward_graph, self.forward_graph)
+        # for node in self.forward_graph.nodes:
+        #     name = getattr(node.target, "__name__") if hasattr(node.target, "__name__") else ""
+        #     print_rank_0(f"{node.op=}, {node.target=}, {name=}")
+        # exit()
+        # self.fused_bwd_fwd_graph = merge_naive(self.backward_graph, self.forward_graph)
+        self.fused_bwd_fwd_graph = merge_overlap_comm_greedy(
+            self.backward_graph, self.forward_graph
+        )
         print_rank_0("naive fused graph: ")
         print_graph_rank_0(self.fused_bwd_fwd_graph)
         # self.fused_bwd_fwd_graph = merge_overlap_comm_greedy(
@@ -223,8 +230,6 @@ class GARunner:
         fwd_inputs = input_micro_batches[0]
         fwd_inputs = self.args_rets_manager.make_forward_inputs(fwd_inputs)
         torch.cuda.nvtx.range_push("forward")
-        print(f"{type(self)=}")
-        print(f"{self.forward_fn=}")
         fwd_outputs = self.forward_fn(*fwd_inputs.dump())
         fwd_outputs = self.args_rets_manager.make_forward_outputs(fwd_outputs)
         collect_forward_outputs.append(fwd_outputs.model_outputs[0].detach().clone())
