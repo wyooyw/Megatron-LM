@@ -48,6 +48,11 @@ except ImportError:
     warnings.warn('Apex is not installed. Falling back to Torch LayerNorm')
     LNImpl = WrappedTorchLayerNorm
 
+from megatron.core.extensions.wyo.model.submodule.layernorm_linear import LayerNormColumnParallelLinear as WYOLayerNormColumnParallelLinear
+from megatron.core.extensions.wyo.model.submodule.row_parallel_linear import RowParallelLinear as WYORowParallelLinear
+from megatron.core.extensions.wyo.model.submodule.flash_attn import Attention as WYOAttention
+from megatron.core.extensions.wyo.model.submodule.attention import SelfAttention as WYOSelfAttention
+
 
 def get_gpt_layer_with_transformer_engine_spec(
     num_experts: Optional[int] = None,
@@ -122,6 +127,58 @@ def get_gpt_layer_with_transformer_engine_spec(
             ),
         )
 
+def get_gpt_layer_with_wyo_spec(
+    num_experts: Optional[int] = None,
+    moe_grouped_gemm: Optional[bool] = False,
+    qk_layernorm: Optional[bool] = False,
+    multi_latent_attention: Optional[bool] = False,
+    fp8: Optional[str] = None,
+) -> ModuleSpec:
+    """Use this spec to use lower-level Transformer Engine modules (required for fp8 training).
+
+
+    Args:
+        num_experts (int, optional): Number of experts. Defaults to None.
+        moe_grouped_gemm (bool, optional): To use Grouped GEMM. Defaults to False.
+        qk_layernorm (bool, optional): To use layernorm for queries/keys. Defaults to False.
+        fp8 (str, optional): Flag to decide the linear layer spec for MoE. Defaults to None.
+
+    Returns:
+        ModuleSpec: Module specification with TE modules
+    """
+    assert fp8 is None
+    assert multi_latent_attention==False
+    assert qk_layernorm==False
+    assert moe_grouped_gemm==False
+    assert num_experts is None
+
+    mlp = _get_mlp_module_spec(
+        use_wyo=True, num_experts=num_experts, moe_grouped_gemm=moe_grouped_gemm, fp8=fp8
+    )
+
+    
+    return ModuleSpec(
+        module=TransformerLayer,
+        submodules=TransformerLayerSubmodules(
+            self_attention=ModuleSpec(
+                module=WYOSelfAttention,
+                params={"attn_mask_type": AttnMaskType.causal},
+                submodules=SelfAttentionSubmodules(
+                    linear_qkv=WYOLayerNormColumnParallelLinear,
+                    core_attention=WYOAttention,
+                    linear_proj=WYORowParallelLinear,
+                    # TENorm significantly harms convergence when used
+                    # for QKLayerNorm; we instead use the Apex implementation.
+                    q_layernorm=FusedLayerNorm if qk_layernorm else IdentityOp,
+                    k_layernorm=FusedLayerNorm if qk_layernorm else IdentityOp,
+                ),
+            ),
+            self_attn_bda=get_bias_dropout_add,
+            pre_mlp_layernorm=TENorm if num_experts else IdentityOp,
+            mlp=mlp,
+            mlp_bda=get_bias_dropout_add,
+        ),
+    )
 
 def get_gpt_layer_local_spec(
     num_experts: Optional[int] = None,
@@ -199,6 +256,7 @@ def get_gpt_layer_local_spec(
 
 def _get_mlp_module_spec(
     use_te: Optional[bool] = True,
+    use_wyo: Optional[bool] = False,
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
     fp8: Optional[str] = None,
@@ -206,11 +264,21 @@ def _get_mlp_module_spec(
     """Helper function to get module spec for MLP/MoE"""
     if num_experts is None:
         # Dense MLP w/ or w/o TE modules.
+        if use_wyo:
+            linear_fc1 = WYOLayerNormColumnParallelLinear
+            linear_fc2 = WYORowParallelLinear
+        elif use_te:
+            linear_fc1 = TELayerNormColumnParallelLinear
+            linear_fc2 = TERowParallelLinear
+        else:
+            linear_fc1 = ColumnParallelLinear
+            linear_fc2 = RowParallelLinear
+            
         return ModuleSpec(
             module=MLP,
             submodules=MLPSubmodules(
-                linear_fc1=TELayerNormColumnParallelLinear if use_te else ColumnParallelLinear,
-                linear_fc2=TERowParallelLinear if use_te else RowParallelLinear,
+                linear_fc1=linear_fc1,
+                linear_fc2=linear_fc2,
             ),
         )
     else:
