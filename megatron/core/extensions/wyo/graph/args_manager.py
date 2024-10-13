@@ -63,6 +63,13 @@ class BackwardInputs:
             returns = [None, *returns]
         return returns
 
+    def size_of_save_for_backwards(self):
+        size = 0
+        for tensor in self.save_for_backwards:
+            if isinstance(tensor, torch.Tensor):
+                size += tensor.element_size() * tensor.numel()
+        return size
+
 
 class BackwardOutputs:
     def __init__(self, parameters_grad, inputs_grad):
@@ -82,13 +89,16 @@ class BackwardForwardInputs:
     #     backward_inputs = BackwardInputs.make_from_forward_outputs(last_step_forward_outputs)
     #     return BackwardForwardInputs(backward_inputs, this_step_forward_inputs)
 
-    def dump(self, first_none=True):
+    def dump(self, first_none=True, wrap=True):
         backward_inputs = self.backward_inputs.dump(first_none=False)
         forward_inputs = self.forward_inputs.dump(first_none=False)
 
         returns = [*backward_inputs, *forward_inputs]
         if first_none:
             returns = [None, *returns]
+
+        if wrap:
+            returns = [[item,] for item in returns]
         return returns
 
 
