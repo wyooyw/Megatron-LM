@@ -9,6 +9,7 @@ import torch.distributed as dist
 import torch.distributed
 import torch.nn as nn
 import torch.utils._pytree as pytree
+from megatron.core.extensions.wyo.status import set_current_status_run
 
 from megatron.core.extensions.wyo.graph.args_manager import (
     BackwardForwardInputs,
@@ -26,6 +27,8 @@ from megatron.core.extensions.wyo.graph.graph_utils import (
     merge_overlap_comm_greedy,
     param_grad_update,
 )
+from megatron.core.extensions.wyo.graph.passes.unwrap import unwrap
+from megatron.core.extensions.wyo.graph.passes.overlap_schedule import overlap_schedule
 from megatron.core.extensions.wyo.graph.passes.comm_sync_to_async import comm_sync_to_async
 from megatron.core.extensions.wyo.graph.utils import is_rank_0, print_graph_rank_0, print_rank_0, seed_everything
 # from wrapped_ops.dist import all_reduce
@@ -118,22 +121,27 @@ class GARunner:
 
         self.forward_graph = keeper.forward_graph
         self.backward_graph = keeper.backward_graph
+        # for node in self.forward_graph.nodes:
+        #     print_rank_0(f"{node.op=}, {node.target=}, {node.args=}")
+        # exit()
         # print_rank_0(f"before: \n{self.forward_graph}\n")
-        comm_sync_to_async(self.forward_graph)
+        # comm_sync_to_async(self.forward_graph)
         # print_rank_0(f"after: \n{self.forward_graph}\n")
-        comm_sync_to_async(self.backward_graph)
+        # comm_sync_to_async(self.backward_graph)
         param_grad_update(self.backward_graph, list(range(len(self.params_flat))))
         # print_rank_0(f"\nafter param_grad_update: \n{self.backward_graph}\n")
         # for node in self.forward_graph.nodes:
         #     name = getattr(node.target, "__name__") if hasattr(node.target, "__name__") else ""
         #     print_rank_0(f"{node.op=}, {node.target=}, {name=}")
         # exit()
-        # self.fused_bwd_fwd_graph = merge_naive(self.backward_graph, self.forward_graph)
-        self.fused_bwd_fwd_graph = merge_overlap_comm_greedy(
-            self.backward_graph, self.forward_graph
-        )
-        print_rank_0("naive fused graph: ")
-        print_graph_rank_0(self.fused_bwd_fwd_graph)
+        self.fused_bwd_fwd_graph = merge_naive(self.backward_graph, self.forward_graph)
+        # self.fused_bwd_fwd_graph = merge_overlap_comm_greedy(
+        #     self.backward_graph, self.forward_graph
+        # )
+        self.fused_bwd_fwd_graph = overlap_schedule(self.fused_bwd_fwd_graph)
+        unwrap(self.fused_bwd_fwd_graph)
+        # print_rank_0("naive fused graph: ")
+        # print_graph_rank_0(self.fused_bwd_fwd_graph)
         # self.fused_bwd_fwd_graph = merge_overlap_comm_greedy(
         #     self.backward_graph, self.forward_graph
         # )
@@ -195,9 +203,10 @@ class GARunner:
                     param.shape, dtype=param.dtype, device=param.device
                 )
 
-    def run(self, input_micro_batches):
+    def run(self, data_loader_fn, post_process_fn):
+        # set_current_status_run()
         with torch.no_grad():
-            return self._run(input_micro_batches)
+            return self._run(data_loader_fn, post_process_fn)
 
     def check_inputs(self, inputs):
         print("Check inputs:")
@@ -217,7 +226,7 @@ class GARunner:
                 print("T" if is_same else "F", end="\t")
             print("")
 
-    def _run(self, input_micro_batches):
+    def _run(self, data_loader_fn, post_process_fn):
         get_and_clear_grads(self.model)
         self.init_param_grad()
         # gc.collect()
@@ -227,12 +236,14 @@ class GARunner:
         collect_forward_outputs = []
         # step 1: run forward
         # print_rank_0("begin run forward")
-        fwd_inputs = input_micro_batches[0]
+        fwd_inputs, loss_masks = data_loader_fn()
         fwd_inputs = self.args_rets_manager.make_forward_inputs(fwd_inputs)
         torch.cuda.nvtx.range_push("forward")
         fwd_outputs = self.forward_fn(*fwd_inputs.dump())
         fwd_outputs = self.args_rets_manager.make_forward_outputs(fwd_outputs)
-        collect_forward_outputs.append(fwd_outputs.model_outputs[0].detach().clone())
+        collect_forward_outputs.append(
+            post_process_fn(fwd_outputs.model_outputs[0].detach().clone(), loss_masks)
+        )
         torch.cuda.nvtx.range_pop()
 
         # gc.collect()
@@ -241,23 +252,37 @@ class GARunner:
         # step 2: run fused_bwd_fwd
         for i in range(1, self.n_ga):
             # print_rank_0("begin run backward-forward")
-            fwd_inputs = input_micro_batches[i]
+            fwd_inputs, loss_masks = data_loader_fn()
             fwd_inputs = self.args_rets_manager.make_forward_inputs(fwd_inputs)
 
             fused_bwd_fwd_inputs = self.args_rets_manager.make_backward_forward_inputs(
                 fwd_outputs, fwd_inputs
             )
+            del fwd_outputs, fwd_inputs
+            # save_for_bwd_size = fused_bwd_fwd_inputs.backward_inputs.size_of_save_for_backwards()
+            # save_for_bwd_size = save_for_bwd_size / 1024 / 1024 / 1024
+            # if i==1:
+            #     print_rank_0(f"{save_for_bwd_size=:.3f} GB")
             # self.check_inputs(fused_bwd_fwd_inputs.dump())
             torch.cuda.nvtx.range_push("back-forward")
-            fused_bwd_fwd_outputs = self.fused_backward_forward_fn(
-                *fused_bwd_fwd_inputs.dump()
-            )
+            fused_backward_forward_fn = partial(self.fused_backward_forward_fn, *fused_bwd_fwd_inputs.dump())
+            del fused_bwd_fwd_inputs
+            # gc.collect()
+            fused_bwd_fwd_outputs = fused_backward_forward_fn()
+            # fused_bwd_fwd_outputs = self.fused_backward_forward_fn(
+            #     *fused_bwd_fwd_inputs.dump()
+            # )
             fused_bwd_fwd_outputs = (
                 self.args_rets_manager.make_backward_forward_outputs(
                     fused_bwd_fwd_outputs
                 )
             )
-            collect_forward_outputs.append(fused_bwd_fwd_outputs.forward_outputs.model_outputs[0].detach().clone())
+            collect_forward_outputs.append(
+                post_process_fn(
+                    fused_bwd_fwd_outputs.forward_outputs.model_outputs[0].detach().clone(),
+                    loss_masks
+                )
+            )
             torch.cuda.nvtx.range_pop()
 
             fwd_outputs = fused_bwd_fwd_outputs.forward_outputs
@@ -265,7 +290,7 @@ class GARunner:
 
             del fused_bwd_fwd_outputs
             del grads
-            del fused_bwd_fwd_inputs
+            # del fused_bwd_fwd_inputs
             # gc.collect()
             # torch.cuda.empty_cache()
         # print_rank_0("begin run backward")
