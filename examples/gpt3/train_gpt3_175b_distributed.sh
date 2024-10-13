@@ -4,10 +4,10 @@
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 # export CUDA_LAUNCH_BLOCKING=1
-GPUS_PER_NODE=2
+GPUS_PER_NODE=8
 # Change for multinode config
 MASTER_ADDR=localhost
-MASTER_PORT=6123
+MASTER_PORT=6124
 NUM_NODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NUM_NODES))
@@ -25,18 +25,45 @@ DISTRIBUTED_ARGS=(
     --master_port $MASTER_PORT
 )
 
+# MICRO_BS=2
+# GLOBAL_BS=16
+# GPT_MODEL_ARGS=(
+#     --num-layers 4
+#     --hidden-size 16384
+#     --num-attention-heads 256
+#     --seq-length 4096 
+#     --max-position-embeddings 4096 
+# )
+
+MICRO_BS=8
+GLOBAL_BS=64
 GPT_MODEL_ARGS=(
     --num-layers 8
-    --hidden-size 4096
-    --num-attention-heads 32
-    --seq-length 1024 
-    --max-position-embeddings 1024 
+    --hidden-size 8192
+    --num-attention-heads 128
+    --seq-length 8192
+    --max-position-embeddings 8192
 )
 
+# MICRO_BS=32
+# GLOBAL_BS=64
+# GPT_MODEL_ARGS=(
+#     --num-layers 4
+#     --hidden-size 4096
+#     --num-attention-heads 32
+#     --seq-length 1024
+#     --max-position-embeddings 1024
+# )
+
 TRAINING_ARGS=(
-    # --transformer-impl transformer_engine
-    --micro-batch-size 4
-    --global-batch-size 4
+    --untie-embeddings-and-output-weights
+    --disable-bias-linear
+    --no-bias-gelu-fusion
+    --no-bias-swiglu-fusion
+    --no-bias-dropout-fusion
+    
+    --micro-batch-size $MICRO_BS
+    --global-batch-size $GLOBAL_BS
     # --rampup-batch-size 16 16 5859375 
     --train-iters 32
     --weight-decay 0.1 
@@ -44,18 +71,19 @@ TRAINING_ARGS=(
     --adam-beta2 0.95 
     --init-method-std 0.006 
     --clip-grad 1.0 
-    # --bf16
+    --bf16
     --lr 6.0e-5 
     --lr-decay-style cosine 
     --min-lr 6.0e-6
     --lr-warmup-fraction .001 
     --lr-decay-iters 430000 
+    --hidden-dropout 0.0
 )
 
 MODEL_PARALLEL_ARGS=(
-	--tensor-model-parallel-size 2 
+	--tensor-model-parallel-size $GPUS_PER_NODE
     --sequence-parallel
-    --tp-comm-overlap
+    # --tp-comm-overlap
 )
 
 DATA_ARGS=(
@@ -68,6 +96,7 @@ DATA_ARGS=(
 )
 
 EVAL_AND_LOGGING_ARGS=(
+    --log-throughput
     --log-interval 1
     --save-interval 10000 
     --eval-interval 1000 
@@ -77,17 +106,18 @@ EVAL_AND_LOGGING_ARGS=(
     # --tensorboard-dir $TENSORBOARD_LOGS_PATH 
 )
 
-PROFILE=(
-    --profile
-    --profile-step-start 10
-    --profile-step-end 20
-)
+# PROFILE=(
+#     --profile
+#     --profile-step-start 5
+#     --profile-step-end 10
+# )
+
 
 nsys profile -w true -t cuda,nvtx -s cpu  \
 --capture-range=cudaProfilerApi \
 --cudabacktrace=true \
 -x true \
--o nsys/tp2_rs_ag_overlap \
+-o nsys/sp${GPUS_PER_NODE}_wyo_overlap_seqlen8k_mbs8 \
 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
