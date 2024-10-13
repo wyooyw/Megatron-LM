@@ -18,6 +18,7 @@ from megatron.core.utils import (
     get_model_xattn,
 )
 import os
+
 USE_WYO = int(os.environ.get("USE_WYO", 0))
 USE_WYO_SCHEDULER = int(os.environ.get("USE_WYO_SCHEDULER", 0))
 if USE_WYO_SCHEDULER:
@@ -1656,6 +1657,29 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
         {'lm loss': (reporting_loss[0], reporting_loss[1])},
     )
 
+def data_loader_fn(data_iterator):
+    tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
+                data_iterator)
+    return (tokens, position_ids, labels), loss_mask
+
+def post_process_fn(output_tensor, loss_mask, num_microbatches, collect_non_loss_data, calculate_per_token_loss):
+    if not collect_non_loss_data:
+        outputs = loss_func(loss_mask, output_tensor)
+        if len(outputs) == 3:
+            output_tensor, num_tokens, loss_reduced = outputs
+            if not calculate_per_token_loss:
+                output_tensor /= num_tokens
+                output_tensor /= num_microbatches
+        else:
+            # preserve legacy loss averaging behavior (ie, over the number of microbatches)
+            assert len(outputs) == 2
+            output_tensor, loss_reduced = outputs
+            output_tensor /= num_microbatches
+        return loss_reduced
+    else:
+        data = loss_func(loss_mask, output_tensor, non_loss_data=True)
+        return data
+
 def forward_backward_wyo(
     *,
     forward_step_func,
@@ -1703,17 +1727,21 @@ def forward_backward_wyo(
 
     timers = get_timers()
     timers('batch-generator', log_level=2).start()
-    input_micro_batches = []
-    loss_masks = []
-    for i in range(num_microbatches):
-        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
-                data_iterator)
-        input_micro_batches.append((tokens, position_ids, labels))
-        loss_masks.append(loss_mask)
-    timers('batch-generator').stop()
+    # input_micro_batches = []
+    # loss_masks = []
+    
+    # torch.cuda.nvtx.range_push("get_batch")
+    # for i in range(num_microbatches):
+    #     tokens, labels, loss_mask, attention_mask, position_ids = get_batch(
+    #             data_iterator)
+    #     input_micro_batches.append((tokens, position_ids, labels))
+    #     loss_masks.append(loss_mask)
+    # timers('batch-generator').stop()
+    # torch.cuda.nvtx.range_pop()
     
     if not hasattr(model, "_fused_runner"):
         print("create GARunner")
+        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator)
         fused_runner = GARunner(
             model, 
             n_ga=num_microbatches, 
@@ -1727,26 +1755,33 @@ def forward_backward_wyo(
     fused_runner = model._fused_runner
     
     # attention_mask is not used; None is not used.
-    forward_outputs = fused_runner.run(input_micro_batches)
 
-    assert len(forward_outputs)==len(loss_masks)
-    for output_tensor, loss_mask in zip(forward_outputs, loss_masks):
-        if not collect_non_loss_data:
-            outputs = loss_func(loss_mask, output_tensor)
-            if len(outputs) == 3:
-                output_tensor, num_tokens, loss_reduced = outputs
-                if not config.calculate_per_token_loss:
-                    output_tensor /= num_tokens
-                    output_tensor /= num_microbatches
-            else:
-                # preserve legacy loss averaging behavior (ie, over the number of microbatches)
-                assert len(outputs) == 2
-                output_tensor, loss_reduced = outputs
-                output_tensor /= num_microbatches
-            forward_data_store.append(loss_reduced)
-        else:
-            data = loss_func(loss_mask, output_tensor, non_loss_data=True)
-            forward_data_store.append(data)
+    forward_data_store = fused_runner.run(
+        partial(data_loader_fn, data_iterator=data_iterator),
+        partial(post_process_fn, num_microbatches=num_microbatches, collect_non_loss_data=collect_non_loss_data, calculate_per_token_loss=config.calculate_per_token_loss)
+    )
+    # print(f"{forward_outputs[0]=}")
+    # print(f"{forward_outputs[1]=}")
+    # exit()
+
+    # assert len(forward_outputs)==len(loss_masks)
+    # for output_tensor, loss_mask in zip(forward_outputs, loss_masks):
+    #     if not collect_non_loss_data:
+    #         outputs = loss_func(loss_mask, output_tensor)
+    #         if len(outputs) == 3:
+    #             output_tensor, num_tokens, loss_reduced = outputs
+    #             if not config.calculate_per_token_loss:
+    #                 output_tensor /= num_tokens
+    #                 output_tensor /= num_microbatches
+    #         else:
+    #             # preserve legacy loss averaging behavior (ie, over the number of microbatches)
+    #             assert len(outputs) == 2
+    #             output_tensor, loss_reduced = outputs
+    #             output_tensor /= num_microbatches
+    #         forward_data_store.append(loss_reduced)
+    #     else:
+    #         data = loss_func(loss_mask, output_tensor, non_loss_data=True)
+    #         forward_data_store.append(data)
 
 
     if config.finalize_model_grads_func is not None and not forward_only:
