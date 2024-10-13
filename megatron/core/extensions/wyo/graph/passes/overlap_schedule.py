@@ -130,8 +130,8 @@ class NodeWrapper:
         self.args = dict()
 
         name = node.target._opname
-        if len(name) > 10:
-            name = name[:10]
+        if len(name) > 15:
+            name = name[:15]
         self.name = f"{node.__sort_idx__}.{name}"
 
     def connect_to(self, node):
@@ -360,22 +360,28 @@ class Graph:
         """
         node_indegree = self.get_node_indegree()
         for node in zero_indegree_comp_nodes:
-            head = self._enumerate_pure_computation_head_begin_with_node(node, node_indegree)
-            yield PureComputionSubGraph(head)
+            head_list = self._enumerate_pure_computation_head_begin_with_node(node, node_indegree)
+            for head in head_list:
+                yield PureComputionSubGraph(head)
 
     def _enumerate_pure_computation_head_begin_with_node(self, begin_node, node_indegree, must_contain_heavy_comp_node=False):
         # print("_enumerate_pure_computation_head_begin_with_node")
+        head_list = []
         head = []
+        max_heavy_node = 2
+        heavy_node = 0
         cur_node = begin_node
-        contain_heavy_node = False
+        # contain_heavy_node = False
         while True:
             head.append(cur_node)
 
             if NodeClassifier.is_heavy_computation_node(cur_node):
-                contain_heavy_node = True
+                heavy_node += 1
+                head_list.append(head.copy())
 
             if (
-                NodeClassifier.is_heavy_computation_node(cur_node)
+                # NodeClassifier.is_heavy_computation_node(cur_node)
+                heavy_node >= max_heavy_node
                 or len(cur_node.users) > 1
                 or len(cur_node.users) == 0
             ):
@@ -391,10 +397,13 @@ class Graph:
             ):
                 break
 
-        if contain_heavy_node and must_contain_heavy_comp_node:
+        if heavy_node >= 0 and must_contain_heavy_comp_node:
             return None
+
+        if not (len(head_list) > 0 and len(head)==len(head_list[-1])):
+            head_list.append(head)
         
-        return head
+        return head_list
 
     def _enumerate_compution_communication_overlap_head(self, zero_indegree_comp_nodes, zero_indegree_comm_nodes):
         
@@ -403,11 +412,11 @@ class Graph:
         # TODO: purn this space
         comp_heads = []
         for comp_node in zero_indegree_comp_nodes:
-            comp_head = self._enumerate_pure_computation_head_begin_with_node(
+            comp_head_list = self._enumerate_pure_computation_head_begin_with_node(
                 begin_node=comp_node,
                 node_indegree=node_indegree
             )
-            comp_heads.append(comp_head)
+            comp_heads.extend(comp_head_list)
         # print(f"{len(comp_heads)=}")
         # pick one comm_node
         for comm_node in zero_indegree_comm_nodes:
@@ -426,6 +435,8 @@ class ComputationCommunicationOverlapSubGraph:
         self.comp_nodes = comp_nodes
 
     def _show(self):
+        self._show_detail()
+        return
         if self.comp_nodes is not None:
             # comp_nodes_val = [f"({node.val})" for node in self.comp_nodes]
             comp_nodes_val = [f"({node.name})" for node in self.comp_nodes]
@@ -436,8 +447,24 @@ class ComputationCommunicationOverlapSubGraph:
             # print_rank_0(f"    comm nodes: {self.comm_node.val}, idx={self.comm_node.__sort_idx__}")
             print_rank_0(f"    comm nodes: {self.comm_node.name}, idx={self.comm_node.__sort_idx__}")
 
+    def _show_detail(self):
+        if self.comp_nodes is not None:
+            print_rank_0(f"  Comp Nodes")
+            for comp_node in self.comp_nodes:
+                print_rank_0(f"    - name: {comp_node.name},")
+                print_rank_0(f"    - users:")
+                for user in comp_node.users.keys():
+                    print_rank_0(f"        {user.name}")
+        
+        if self.comm_node is not None:
+            print_rank_0(f"  Comm Nodes")
+            print_rank_0(f"    - name: {self.comm_node.name},")
+            print_rank_0(f"    - users:")
+            for user in self.comm_node.users.keys():
+                print_rank_0(f"      - {user.name}")
+
     def show(self):
-        print_rank_0("comm comp overlap head:")
+        print_rank_0("Comm Comp Overlap Head:")
         self._show()
 
     def score(self):
@@ -479,7 +506,7 @@ class PureComputionSubGraph(ComputationCommunicationOverlapSubGraph):
         return PureComputionSubGraph(all_comp_nodes)
 
     def show(self):
-        print_rank_0("comp head:")
+        print_rank_0("Comp Head:")
         self._show()
             
             
@@ -488,7 +515,7 @@ class PureCommunicationSubGraph(ComputationCommunicationOverlapSubGraph):
         super().__init__(comm_node, None)
 
     def show(self):
-        print_rank_0("comm head:")
+        print_rank_0("Comm Head:")
         self._show()
 
 
@@ -548,17 +575,17 @@ class OverlapScheduler:
             comp_time = 0
             for comp_node in head.comp_nodes:
                 comp_time += self.get_node_score(comp_node)
-            return comp_time
+            return comp_time, {"comp": comp_time, "comm": 0}
         elif isinstance(head, PureCommunicationSubGraph):
             comm_time = self.get_node_score(head.comm_node)
-            return comm_time
+            return comm_time, {"comp": 0, "comm": comm_time}
         elif isinstance(head, ComputationCommunicationOverlapSubGraph):
             assert head.comm_node is not None
             comm_time = self.get_node_score(head.comm_node)
             comp_time = 0
             for comp_node in head.comp_nodes:
                 comp_time += self.get_node_score(comp_node)
-            return max(comm_time, comp_time)
+            return max(comm_time, comp_time), {"comp": comp_time, "comm": comm_time}
         else:
             assert False, "This should not happen!"
 
@@ -577,12 +604,12 @@ class OverlapScheduler:
         self._search_cnt += 1
         
         if self._search_cnt % 10000 == 0:
-            print(f"{self._search_cnt=}")
+            print_rank_0(f"{self._search_cnt=}")
 
         min_score = 9999999999
         min_head = None
         for head in graph.forall_heads():
-            head_score = self.get_head_score(head)
+            head_score,_ = self.get_head_score(head)
             left_graph = graph.erase(head.get_nodes())
             left_graph_score = self.find_best_partition_strategy(left_graph)
             # print(f"{head_score=}, {left_graph_score=}")
@@ -620,7 +647,16 @@ class OverlapScheduler:
         # print("")
         # print(f"{self.record_head=}")
         # exit()
+        torch.distributed.barrier()
         head_list = self.get_partition_from_record_head(graph)
+        print_rank_0(f"Show heads begin")
+        for head in head_list:
+            head.show()
+            score, detail = self.get_head_score(head)
+            print_rank_0(f"    {score=}, {detail=}")
+        print_rank_0(f"Show heads end")
+        torch.distributed.barrier()
+        # exit()
         # print("get_partition_from_record_head finish")
         return head_list
         fused_graph = torch.fx.graph.Graph()
@@ -756,7 +792,7 @@ def overlap_schedule(graph):
     )
 
     # fused_graph = generate_fx_graph_from_two_graphs(placeholder_nodes, output_nodes, graph, fused_super_graph)
-    exit()
+    # exit()
     return fused_graph
 
 
@@ -795,7 +831,7 @@ def generate_fx_graph_from_two_graphs(placeholder_nodes, output_nodes, graph, su
     for super_node in super_nodes:
         # add super_node into fx graph
         node = super_node.node
-        print_rank_0(f"{super_node.name=},   {node_indegree[node]=}")
+        # print_rank_0(f"{super_node.name=},   {node_indegree[node]=}")
         assert node_indegree[node]==0, f"{node_indegree[node]=}"
         fx_nodes.append(node)
 
@@ -911,7 +947,7 @@ def generate_fx_graph_from_super_graph_heads(
     _add_nodes_to(_iter_common_node_from_begin_nodes(zero_indegree_nodes, node_indegree), fused_graph, value_remap)
     print_rank_0("Begin build body!")
     for head in super_graph_heads:
-        head.show()
+        # head.show()
         if isinstance(head, PureComputionSubGraph):
 
             super_nodes = list(head.comp_nodes)
@@ -1301,7 +1337,8 @@ def _get_to_main_node(node, nodes_in_main, main_road, from_begin_road):
     assert cur in nodes_in_main
     parent_in_main_road = cur
 
-    dis *= 2
+    dis *= 4
+    
 
     parent_idx_in_main_road = None
     for idx, node in enumerate(main_road):
@@ -1310,6 +1347,8 @@ def _get_to_main_node(node, nodes_in_main, main_road, from_begin_road):
             break
 
     to_main_node = main_road[min(len(main_road)-1, parent_idx_in_main_road + dis)]
+
+    print_rank_0(f"connect to main node: {node.name=}, {to_main_node.name=}, {dis=}")
     return to_main_node
 
 def _get_from_main_node(node, nodes_in_main, main_road, to_end_road):
@@ -1322,7 +1361,7 @@ def _get_from_main_node(node, nodes_in_main, main_road, to_end_road):
     assert cur in nodes_in_main
     child_in_main_road = cur
 
-    dis *= 8
+    dis *= 4
 
     child_idx_in_main_road = None
     for idx, node in enumerate(main_road):
@@ -1331,6 +1370,7 @@ def _get_from_main_node(node, nodes_in_main, main_road, to_end_road):
             break
 
     from_main_node = main_road[max(0, child_idx_in_main_road - dis)]
+    print_rank_0(f"connect from main node: {node.name=}, {from_main_node.name=}, {dis=}")
     return from_main_node
 
 
