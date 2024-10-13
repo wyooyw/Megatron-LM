@@ -36,6 +36,13 @@ from .mappings import (
 from .random import get_cuda_rng_tracker, get_expert_parallel_rng_tracker_name
 from .utils import VocabUtility, divide
 
+import os
+use_wyo = int(os.environ.get("USE_WYO", 0))
+if use_wyo:
+    from megatron.core.extensions.wyo.model.communicate.communicate import all_reduce_in_tp_group as reduce_from_tensor_model_parallel_region
+else:
+    from .mappings import reduce_from_tensor_model_parallel_region
+
 _grad_accum_fusion_available = True
 try:
     import fused_weight_gradient_mlp_cuda

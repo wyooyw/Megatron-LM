@@ -712,6 +712,7 @@ def setup_model_and_optimizer(model_provider_func,
 
 def train_step(forward_step_func, data_iterator,
                model, optimizer, opt_param_scheduler, config):
+    torch.cuda.nvtx.range_push("train_step")
     """Single training step."""
     args = get_args()
     timers = get_timers()
@@ -765,7 +766,7 @@ def train_step(forward_step_func, data_iterator,
     # Empty unused memory.
     if args.empty_unused_memory_level >= 2:
         torch.cuda.empty_cache()
-
+    torch.cuda.nvtx.range_pop()
     if mpu.is_pipeline_last_stage(ignore_virtual=True):
         # Average loss across microbatches.
         loss_reduced = {}
@@ -786,6 +787,7 @@ def train_step(forward_step_func, data_iterator,
                     denominator += 1
             loss_reduced[key] = numerator / denominator
         return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
+    
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
 
@@ -1010,6 +1012,11 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
             total_loss_dict[skipped_iters_key])
         log_string += ' number of nan iterations: {:3d} |'.format(
             total_loss_dict[nan_iters_key])
+        
+        max_memory_allocated = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
+        torch.cuda.reset_peak_memory_stats()
+        log_string += ' max_memory_allocated: {:.3f}GB |'.format(max_memory_allocated)
+
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0

@@ -1,6 +1,7 @@
 from typing import Tuple
 
 import torch
+from megatron.core.extensions.wyo.status import is_current_status_trace
 
 from megatron.core.parallel_state import (
     get_tensor_model_parallel_group,
@@ -138,7 +139,10 @@ def vocab_parallel_cross_entropy_backward(
             grad_2d, arange_1d, masked_target_1d, softmax_update, grad_input, grad_output
         )
 
-    return grad_input.clone()
+    if is_current_status_trace():
+        grad_input = grad_input.clone()
+        
+    return grad_input
 
 
 @vocab_parallel_cross_entropy_backward.register_fake

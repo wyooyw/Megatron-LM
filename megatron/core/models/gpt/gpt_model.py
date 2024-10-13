@@ -16,10 +16,11 @@ from megatron.core.transformer.enums import ModelType
 from megatron.core.transformer.spec_utils import ModuleSpec
 # from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.extensions.wyo.model.operator.begin_end import begin, end
 
 import os
-use_wyo = int(os.environ.get("USE_WYO", 0))
-if use_wyo:
+USE_WYO = int(os.environ.get("USE_WYO", 0))
+if USE_WYO:
     from megatron.core.extensions.wyo.model.submodule.language_model_embedding import LanguageModelEmbedding
     from megatron.core.extensions.wyo.model.submodule.transformer_block import TransformerBlock
     from megatron.core.extensions.wyo.model.submodule.col_parallel_linear import ColumnParallelLinear
@@ -225,6 +226,10 @@ class GPTModel(LanguageModule):
             # decoder will get hidden_states from encoder.input_tensor
             decoder_input = None
 
+        if USE_WYO:
+            assert self.pre_process
+            decoder_input = begin(decoder_input)
+
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
         if self.position_embedding_type == 'rope' and not self.config.multi_latent_attention:
@@ -271,6 +276,9 @@ class GPTModel(LanguageModule):
             return logits.transpose(0, 1).contiguous()
 
         loss = self.compute_language_model_loss(labels, logits)
+
+        if USE_WYO:
+            loss = end(loss)
 
         return loss
 
