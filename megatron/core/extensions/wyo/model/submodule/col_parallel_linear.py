@@ -106,8 +106,11 @@ class ColumnParallelLinear(megatron_ColumnParallelLinear):
             
         # torch.cuda.nvtx.range_push("wyo RowParallelLinear")
 
-        # 1.all-gather
-        ag_out = gather_along_first_dim_in_tp_group(input_)
+        if self.config.sequence_parallel:
+            # 1.all-gather
+            ag_out = gather_along_first_dim_in_tp_group(input_)
+        else:
+            ag_out = input_
 
         # 2.fc
         fc_out = torch.matmul(ag_out, weight.t())

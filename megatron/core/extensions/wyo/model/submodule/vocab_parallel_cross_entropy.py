@@ -122,6 +122,28 @@ def vocab_parallel_cross_entropy_backward(
     vocab_size: int
 ) -> torch.Tensor:
 
+    grad_input = vocab_parallel_cross_entropy_backward_inplace(
+        grad_output,
+        softmax,
+        target_mask,
+        masked_target_1d,
+        label_smoothing,
+        vocab_size
+    )
+
+    if is_current_status_trace():
+        grad_input = grad_input.clone()
+        
+    return grad_input
+
+def vocab_parallel_cross_entropy_backward_inplace(
+    grad_output: torch.Tensor,
+    softmax: torch.Tensor,
+    target_mask: torch.Tensor,
+    masked_target_1d: torch.Tensor,
+    label_smoothing: float,
+    vocab_size: int
+):
     (grad_2d, arange_1d, softmax_update, grad_input) = (
         VocabParallelCrossEntropy.prepare_gradient_calculation_operands(softmax, target_mask)
     )
@@ -138,12 +160,8 @@ def vocab_parallel_cross_entropy_backward(
         grad_input = VocabParallelCrossEntropy.calculate_gradients(
             grad_2d, arange_1d, masked_target_1d, softmax_update, grad_input, grad_output
         )
-
-    if is_current_status_trace():
-        grad_input = grad_input.clone()
         
     return grad_input
-
 
 @vocab_parallel_cross_entropy_backward.register_fake
 def vocab_parallel_cross_entropy_backward_abstract(

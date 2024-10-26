@@ -33,7 +33,8 @@ from transformer_engine.pytorch.module.base import (
 )
 from megatron.core.extensions.wyo.model.communicate.communicate import (
     gather_along_first_dim_in_tp_group,
-    reduce_scatter_along_first_dim_in_tp_group
+    reduce_scatter_along_first_dim_in_tp_group,
+    all_reduce_in_tp_group
 )
 from megatron.core.extensions.wyo.model.operator.layer_norm import layer_norm, layer_norm_bwd
 
@@ -61,7 +62,7 @@ class RowParallelLinear(TransformerEngineBaseModule):
         self.config = config
         # assert skip_bias_add==False
         assert bias==False
-        assert config.sequence_parallel==True
+        # assert config.sequence_parallel==True
         assert is_expert==False
         
 
@@ -117,9 +118,13 @@ class RowParallelLinear(TransformerEngineBaseModule):
         # 1.fc
         fc_out = torch.matmul(inp, self.weight.t())
 
-        # 2.reduce-scatter
-        rs_out = reduce_scatter_along_first_dim_in_tp_group(fc_out)
+        if self.config.sequence_parallel:
+            # 2.reduce-scatter
+            out = reduce_scatter_along_first_dim_in_tp_group(fc_out)
+        else:
+            # 2.all-reduce
+            out = all_reduce_in_tp_group(fc_out)
 
         # torch.cuda.nvtx.range_pop()
 
-        return rs_out, None
+        return out, None

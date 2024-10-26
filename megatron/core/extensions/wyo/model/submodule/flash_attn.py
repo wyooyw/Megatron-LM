@@ -9,7 +9,7 @@ from typing import Tuple
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     AttnMaskType,
 )
-
+import flash_attn_2_cuda as flash_attn_cuda
 
 # Use torch.library.custom_op to define a new custom operator.
 # If your operator mutates any input Tensors, their names must be specified
@@ -31,17 +31,33 @@ def flash_attn(q: torch.Tensor,
     rng_state = None
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
-    out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_forward(
+    # out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_forward(
+    #     q,
+    #     k,
+    #     v,
+    #     dropout_p,
+    #     softmax_scale,
+    #     causal=causal,
+    #     window_size=(-1, -1),
+    #     # softcap=0.0,
+    #     alibi_slopes=None,
+    #     return_softmax=return_softmax and dropout_p > 0,
+    # )
+    maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
+    q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+    out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = flash_attn_cuda.fwd(
         q,
         k,
         v,
+        None,
+        None, #alibi_slopes,
         dropout_p,
         softmax_scale,
-        causal=causal,
-        window_size=(-1, -1),
-        # softcap=0.0,
-        alibi_slopes=None,
-        return_softmax=return_softmax and dropout_p > 0,
+        causal,
+        -1, #window_size[0],
+        -1, #window_size[1],
+        return_softmax and dropout_p > 0,
+        None,
     )
     return out, softmax_lse, rng_state
 
@@ -219,3 +235,38 @@ class Attention(nn.Module):
         return out
 
 
+def flash_attn_inplace(q: torch.Tensor,
+                k: torch.Tensor,
+                v: torch.Tensor,
+                dropout_p: float,
+                softmax_scale: float,
+                causal: bool,
+                deterministic: bool,
+                return_softmax: bool,
+                out: torch.Tensor
+                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # out = None
+    softmax_lse = None
+    S_dmask = None 
+    out_padded = None
+    rng_state = None
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    
+    maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
+    q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+    out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = flash_attn_cuda.fwd(
+        q,
+        k,
+        v,
+        out,
+        None, #alibi_slopes,
+        dropout_p,
+        softmax_scale,
+        causal,
+        -1, #window_size[0],
+        -1, #window_size[1],
+        return_softmax and dropout_p > 0,
+        None,
+    )
+    return out, softmax_lse, rng_state
