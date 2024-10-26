@@ -217,6 +217,7 @@ class GPTModel(LanguageModule):
         # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
         # Otherwise, apply embedding layer on input_ids and position_ids to get decoder_input.
         # Decoder embedding.
+
         if decoder_input is not None:
             pass
         elif self.pre_process:
@@ -226,9 +227,9 @@ class GPTModel(LanguageModule):
             # decoder will get hidden_states from encoder.input_tensor
             decoder_input = None
 
-        if USE_WYO:
-            assert self.pre_process
-            decoder_input = begin(decoder_input)
+        # if USE_WYO:
+        #     assert self.pre_process
+        #     decoder_input = begin(decoder_input)
 
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None

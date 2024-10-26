@@ -36,9 +36,11 @@ from .mappings import (
 from .random import get_cuda_rng_tracker, get_expert_parallel_rng_tracker_name
 from .utils import VocabUtility, divide
 
+from megatron.core.extensions.wyo.model.operator.begin_end import begin, end
+
 import os
-use_wyo = int(os.environ.get("USE_WYO", 0))
-if use_wyo:
+USE_WYO = int(os.environ.get("USE_WYO", 0))
+if USE_WYO:
     from megatron.core.extensions.wyo.model.communicate.communicate import all_reduce_in_tp_group as reduce_from_tensor_model_parallel_region
 else:
     from .mappings import reduce_from_tensor_model_parallel_region
@@ -250,6 +252,10 @@ class VocabParallelEmbedding(torch.nn.Module):
         else:
             # F.embedding currently has a non-deterministic backward function
             output_parallel = F.embedding(masked_input, self.weight)
+
+        if USE_WYO:
+            output_parallel = begin(output_parallel)
+
         # Mask the output embedding.
         if self.tensor_model_parallel_size > 1:
             t1 = input_mask.unsqueeze(2) # [x, y, 1]
