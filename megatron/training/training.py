@@ -280,6 +280,8 @@ def pretrain(
     args = get_args()
     timers = get_timers()
 
+    # torch.cuda.set_per_process_memory_fraction(0.9, device=None)
+
     # Track E2E metrics on pretrain start
     one_logger_utils.on_pretrain_start()
 
@@ -1014,8 +1016,10 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
             total_loss_dict[nan_iters_key])
         
         max_memory_allocated = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
-        torch.cuda.reset_peak_memory_stats()
+        max_memory_reserved = torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024
+        # torch.cuda.reset_peak_memory_stats()
         log_string += ' max_memory_allocated: {:.3f}GB |'.format(max_memory_allocated)
+        log_string += ' max_memory_reserved: {:.3f}GB |'.format(max_memory_reserved)
 
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
@@ -1218,6 +1222,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         with_stack=True)
         prof.start()
 
+    # torch.cuda.memory._record_memory_history()
     while iteration < args.train_iters:
         if args.profile and torch.distributed.get_rank() in args.profile_ranks:
             if args.use_pytorch_profiler:
@@ -1243,7 +1248,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                                          checkpointing_context, train_data_iterator=train_data_iterator)
         num_microbatches = get_num_microbatches()
         update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
-
+        # if iteration >= 3:
+        #     torch.cuda.memory._record_memory_history()
         args.curr_iteration = iteration
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
             train_step(forward_step_func,
@@ -1252,6 +1258,12 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                        optimizer,
                        opt_param_scheduler,
                        config)
+        # if iteration >= 3:
+        #     rank = torch.distributed.get_rank()
+        #     exp_name = os.environ.get("EXP_NAME", "default")
+        #     torch.cuda.memory._dump_snapshot(f"memory_snapshot_{exp_name}_{rank}.pickle")
+        #     sys.exit()
+        
         iteration += 1
         batch_size = mpu.get_data_parallel_world_size() * \
                      args.micro_batch_size * \
