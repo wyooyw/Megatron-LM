@@ -4,7 +4,7 @@
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 # export CUDA_LAUNCH_BLOCKING=1
-GPUS_PER_NODE=2
+GPUS_PER_NODE=8
 # Change for multinode config
 MASTER_ADDR=localhost
 MASTER_PORT=6124
@@ -37,13 +37,12 @@ DISTRIBUTED_ARGS=(
 #     --max-position-embeddings $SEQLEN
 # )
 
-MICRO_BS=12
-GLOBAL_BS=48
-SEQLEN=4096
+MICRO_BS=8
+GLOBAL_BS=64
+SEQLEN=1024
 GPT_MODEL_ARGS=(
-    --num-layers 10
+    --num-layers 40
     --hidden-size 5120
-    --ffn-hidden-size 13824
     --num-attention-heads 40
     --seq-length $SEQLEN
     --max-position-embeddings $SEQLEN
@@ -59,7 +58,7 @@ TRAINING_ARGS=(
     --micro-batch-size $MICRO_BS
     --global-batch-size $GLOBAL_BS
     # --rampup-batch-size 16 16 5859375 
-    --train-iters 32
+    --train-iters 16
     --weight-decay 0.1 
     --adam-beta1 0.9 
     --adam-beta2 0.95 
@@ -76,7 +75,6 @@ TRAINING_ARGS=(
 
 MODEL_PARALLEL_ARGS=(
 	--tensor-model-parallel-size $GPUS_PER_NODE
-    --sequence-parallel
     # --tp-comm-overlap
 )
 
@@ -111,7 +109,7 @@ EVAL_AND_LOGGING_ARGS=(
 # --capture-range=cudaProfilerApi \
 # --cudabacktrace=true \
 # -x true \
-# -o nsys/llama_sp${GPUS_PER_NODE}_mbs${MICRO_BS}_gbs${GLOBAL_BS}_s${SEQLEN}_${EXP_NAME} \
+# -o nsys/llama_tp${GPUS_PER_NODE}_mbs${MICRO_BS}_gbs${GLOBAL_BS}_s${SEQLEN}_${EXP_NAME} \
 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \

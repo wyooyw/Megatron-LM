@@ -4,7 +4,7 @@
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 # export CUDA_LAUNCH_BLOCKING=1
-GPUS_PER_NODE=2
+GPUS_PER_NODE=4
 # Change for multinode config
 MASTER_ADDR=localhost
 MASTER_PORT=6124
@@ -25,23 +25,48 @@ DISTRIBUTED_ARGS=(
     --master_port $MASTER_PORT
 )
 
-# MICRO_BS=16
-# GLOBAL_BS=128
-# SEQLEN=4096
+# MICRO_BS=2
+# GLOBAL_BS=16
 # GPT_MODEL_ARGS=(
-#     --num-layers 8
-#     --hidden-size 5120
-#     --ffn-hidden-size 13824
-#     --num-attention-heads 40
-#     --seq-length $SEQLEN
-#     --max-position-embeddings $SEQLEN
+#     --num-layers 4
+#     --hidden-size 16384
+#     --num-attention-heads 256
+#     --seq-length 4096 
+#     --max-position-embeddings 4096 
 # )
 
-MICRO_BS=12
-GLOBAL_BS=48
-SEQLEN=4096
+# MICRO_BS=8
+# GLOBAL_BS=64
+# GPT_MODEL_ARGS=(
+#     --num-layers 4
+#     --hidden-size 8192
+#     --num-attention-heads 128
+#     --seq-length 8192
+#     --max-position-embeddings 8192
+# )
+# MICRO_BS=8
+# GLOBAL_BS=64
+# GPT_MODEL_ARGS=(
+#     --num-layers 4
+#     --hidden-size 8192
+#     --num-attention-heads 128
+#     --seq-length 8192
+#     --max-position-embeddings 8192
+# )
+# MICRO_BS=8
+# GLOBAL_BS=64
+# GPT_MODEL_ARGS=(
+#     --num-layers 4
+#     --hidden-size 8192
+#     --num-attention-heads 128
+#     --seq-length 8192
+#     --max-position-embeddings 8192
+# )
+MICRO_BS=4
+GLOBAL_BS=32
+SEQLEN=1024
 GPT_MODEL_ARGS=(
-    --num-layers 10
+    --num-layers 8
     --hidden-size 5120
     --ffn-hidden-size 13824
     --num-attention-heads 40
@@ -75,8 +100,8 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-	--tensor-model-parallel-size $GPUS_PER_NODE
-    --sequence-parallel
+	# --tensor-model-parallel-size $GPUS_PER_NODE
+    --pipeline-model-parallel-size $GPUS_PER_NODE
     # --tp-comm-overlap
 )
 
@@ -100,18 +125,18 @@ EVAL_AND_LOGGING_ARGS=(
     # --tensorboard-dir $TENSORBOARD_LOGS_PATH 
 )
 
-# PROFILE=(
-#     --profile
-#     --profile-step-start 5
-#     --profile-step-end 10
-# )
+PROFILE=(
+    --profile
+    --profile-step-start 5
+    --profile-step-end 10
+)
 
 
-# nsys profile -w true -t cuda,nvtx -s cpu  \
-# --capture-range=cudaProfilerApi \
-# --cudabacktrace=true \
-# -x true \
-# -o nsys/llama_sp${GPUS_PER_NODE}_mbs${MICRO_BS}_gbs${GLOBAL_BS}_s${SEQLEN}_${EXP_NAME} \
+nsys profile -w true -t cuda,nvtx -s cpu  \
+--capture-range=cudaProfilerApi \
+--cudabacktrace=true \
+-x true \
+-o nsys/llama_pp${GPUS_PER_NODE}_mbs${MICRO_BS}_gbs${GLOBAL_BS}_s${SEQLEN}_${EXP_NAME} \
 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
