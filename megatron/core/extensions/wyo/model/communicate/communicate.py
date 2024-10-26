@@ -118,8 +118,13 @@ def all_reduce_in_tp_group(_inp: torch.Tensor, async_op: bool=False) -> torch.Te
         process_group=parallel_state.get_tensor_model_parallel_group(),
         async_op=async_op
     )
+
+    # make dynamo happy
+    output = output.clone()
+    
     if async_op:
         HANDLES[output] = handle
+
     return output
 
 @all_reduce_in_tp_group.register_fake
@@ -131,6 +136,17 @@ def _backward_all_reduce_in_tp_group(ctx, dout):
     return din, None
 
 all_reduce_in_tp_group.register_autograd(_backward_all_reduce_in_tp_group, setup_context=no_setup)
+
+def all_reduce_in_tp_group_inplace(_inp: torch.Tensor, async_op: bool=False) -> torch.Tensor:
+    output, handle = _all_reduce(
+        _inp, 
+        process_group=parallel_state.get_tensor_model_parallel_group(),
+        async_op=async_op
+    )
+    if async_op:
+        HANDLES[output] = handle
+
+    return output
 
 """
 Wait
@@ -156,6 +172,7 @@ def _gather_along_first_dim(
     input_: torch.Tensor,
     process_group,
     async_op: bool = False,
+    output=None
 ) -> Tuple[torch.Tensor, Any]:
     """All-gather tensors and concatenate along first dimension."""
 
@@ -167,12 +184,15 @@ def _gather_along_first_dim(
     # Allocate output tensor
     output_shape = list(input_.size())
     output_shape[0] *= world_size
-    output = torch.empty(
-        output_shape,
-        dtype=input_.dtype,
-        device=input_.device,
-        memory_format=torch.contiguous_format,
-    )
+
+    if output is None:
+        output = torch.empty(
+            output_shape,
+            dtype=input_.dtype,
+            device=input_.device,
+            memory_format=torch.contiguous_format,
+        )
+    
     src = input_.contiguous()
     dst = output
 
@@ -186,7 +206,7 @@ def _gather_along_first_dim(
     return output, handle
 
 def _reduce_scatter_along_first_dim(
-    input_: torch.Tensor, process_group, async_op: bool = False
+    input_: torch.Tensor, process_group, async_op: bool = False, output=None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Reduce-scatter the input tensor across model parallel group."""
     world_size = get_distributed_world_size(process_group)
@@ -201,7 +221,9 @@ def _reduce_scatter_along_first_dim(
 
     dim_size[0] = dim_size[0] // world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=input_.device)
+    if output is None:
+        output = torch.empty(dim_size, dtype=input_.dtype, device=input_.device)
+    
     handle = torch.distributed.reduce_scatter_tensor(
         output, input_.contiguous(), group=process_group, async_op=async_op
     )
@@ -240,9 +262,27 @@ def _all_reduce(input_, process_group, async_op=False):
 
     # All-reduce.
     handle = torch.distributed.all_reduce(input_.contiguous(), group=process_group, async_op=async_op)
-
-    if is_current_status_trace():
-        input_ = input_.clone()
         
     return input_, handle
-    
+
+def reduce_scatter_along_first_dim_in_tp_group_inplace(_inp: torch.Tensor, async_op: bool=False, out: torch.Tensor=None) -> torch.Tensor:
+    output, handle = _reduce_scatter_along_first_dim(
+        _inp, 
+        process_group=parallel_state.get_tensor_model_parallel_group(),
+        async_op=async_op,
+        output=out
+    )
+    if async_op:
+        HANDLES[output] = handle
+    return output
+
+def gather_along_first_dim_in_tp_group_inplace(_inp: torch.Tensor, async_op: bool=False, out: torch.Tensor=None) -> torch.Tensor:
+    output, handle = _gather_along_first_dim(
+        _inp, 
+        process_group=parallel_state.get_tensor_model_parallel_group(),
+        async_op=async_op,
+        output=out
+    )
+    if async_op:
+        HANDLES[output] = handle
+    return output

@@ -8,6 +8,7 @@ from megatron.core.extensions.wyo.model.communicate.communicate import (
     gather_along_first_dim_in_tp_group,
     reduce_scatter_along_first_dim_in_tp_group,
     all_reduce_in_tp_group,
+    all_reduce_in_tp_group_inplace
 )
 
 class BasicProfiler:
@@ -74,6 +75,13 @@ class BasicProfiler:
             fwd_predict_time = flops / self.throughput["compute_bf16"]
             predict_time = fwd_predict_time * 2
 
+        # elif op_name == "vocab_parallel_cross_entropy":
+        #     print_rank_0("meet vocab_parallel_cross_entropy!")
+        #     predict_time = 13
+
+        # elif op_name == "vocab_parallel_cross_entropy_backward":
+        #     predict_time = 5
+
         else:
             predict_time = 0
 
@@ -86,7 +94,7 @@ class BasicProfiler:
         comm_fn = {
             "gather_along_first_dim_in_tp_group":gather_along_first_dim_in_tp_group,
             "reduce_scatter_along_first_dim_in_tp_group":reduce_scatter_along_first_dim_in_tp_group,
-            "all_reduce_in_tp_group":all_reduce_in_tp_group,
+            "all_reduce_in_tp_group":all_reduce_in_tp_group_inplace,
         }[comm_name]
 
         comm_fn = partial(comm_fn, _inp=input_tensor, async_op=False)

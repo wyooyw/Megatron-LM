@@ -27,6 +27,12 @@ from megatron.core.extensions.wyo.graph.graph_utils import (
     merge_overlap_comm_greedy,
     param_grad_update,
 )
+
+from megatron.core.extensions.wyo.graph.passes.buffer_reuse import try_reuse_buffer_until_no_change
+from megatron.core.extensions.wyo.graph.passes.memory_profile import insert_memory_profile
+from megatron.core.extensions.wyo.graph.passes.comm_elimination import comm_elimination
+from megatron.core.extensions.wyo.graph.passes.redundant_clone_eliminate import redundant_clone_eliminate
+from megatron.core.extensions.wyo.graph.passes.inplace import inplace
 from megatron.core.extensions.wyo.graph.passes.unwrap import unwrap
 from megatron.core.extensions.wyo.graph.passes.overlap_schedule import overlap_schedule
 from megatron.core.extensions.wyo.graph.passes.comm_sync_to_async import comm_sync_to_async
@@ -69,7 +75,7 @@ class GARunner:
     def _cnt_graph_placeholder(self, graph):
         return sum([1 for node in graph.nodes if node.op == "placeholder"])
 
-    def _get_forbid_reuse_nodes(self):
+    def _get_forbid_reuse_nodes(self, backward_only=False):
         """
         weights and inputs can not be reuse
         """
@@ -88,7 +94,12 @@ class GARunner:
 
         placeholder_cnt = 0
         forbid_reuse_nodes = []
-        for node in self.fused_bwd_fwd_graph.nodes:
+        if backward_only:
+            graph = self.backward_graph
+        else:
+            graph = self.fused_bwd_fwd_graph
+
+        for node in graph.nodes:
             if node.op == "placeholder":
                 if fwd_args_begin <= placeholder_cnt and placeholder_cnt < fwd_args_end:
                     forbid_reuse_nodes.append(node)
@@ -128,18 +139,52 @@ class GARunner:
         # comm_sync_to_async(self.forward_graph)
         # print_rank_0(f"after: \n{self.forward_graph}\n")
         # comm_sync_to_async(self.backward_graph)
-        param_grad_update(self.backward_graph, list(range(len(self.params_flat))))
-        # print_rank_0(f"\nafter param_grad_update: \n{self.backward_graph}\n")
-        # for node in self.forward_graph.nodes:
-        #     name = getattr(node.target, "__name__") if hasattr(node.target, "__name__") else ""
-        #     print_rank_0(f"{node.op=}, {node.target=}, {name=}")
-        # exit()
-        self.fused_bwd_fwd_graph = merge_naive(self.backward_graph, self.forward_graph)
+
+        # greedy
+        # comm_sync_to_async(self.forward_graph)
+        # comm_sync_to_async(self.backward_graph)
+        # param_grad_update(self.backward_graph, list(range(len(self.params_flat))))
         # self.fused_bwd_fwd_graph = merge_overlap_comm_greedy(
         #     self.backward_graph, self.forward_graph
         # )
+        # unwrap(self.fused_bwd_fwd_graph)
+        # inplace_allreduce(self.fused_bwd_fwd_graph)
+        # redundant_clone_eliminate(self.fused_bwd_fwd_graph)
+        # forbid_reuse_nodes = self._get_forbid_reuse_nodes()
+        # try_reuse_buffer_until_no_change(self.fused_bwd_fwd_graph, forbid_reuse_nodes)
+        
+        # insert_memory_profile(self.fused_bwd_fwd_graph, round = 80)
+
+        # smart
+        param_grad_update(self.backward_graph, list(range(len(self.params_flat))))
+        self.fused_bwd_fwd_graph = merge_naive(self.backward_graph, self.forward_graph)
         self.fused_bwd_fwd_graph = overlap_schedule(self.fused_bwd_fwd_graph)
         unwrap(self.fused_bwd_fwd_graph)
+        inplace(self.fused_bwd_fwd_graph)
+        redundant_clone_eliminate(self.fused_bwd_fwd_graph)
+
+        if self.n_ga > 1:
+            forbid_reuse_nodes = self._get_forbid_reuse_nodes()
+            # insert_memory_profile(self.fused_bwd_fwd_graph, round=128)
+            try_reuse_buffer_until_no_change(self.fused_bwd_fwd_graph, forbid_reuse_nodes)
+        
+        unwrap(self.backward_graph)
+        inplace(self.backward_graph)
+        comm_sync_to_async(self.backward_graph)
+        forbid_reuse_nodes = self._get_forbid_reuse_nodes(backward_only=True)
+        # try_reuse_buffer_until_no_change(self.backward_graph, forbid_reuse_nodes)
+        insert_memory_profile(self.backward_graph, round=128)
+
+        # print_rank_0("Backward reuse finish!")
+
+        
+
+        # insert_memory_profile(self.fused_bwd_fwd_graph, round=80)
+
+        # insert_memory_profile(self.fused_bwd_fwd_graph)
+        # comm_elimination(self.fused_bwd_fwd_graph)
+
+
         # print_rank_0("naive fused graph: ")
         # print_graph_rank_0(self.fused_bwd_fwd_graph)
         # self.fused_bwd_fwd_graph = merge_overlap_comm_greedy(
@@ -297,7 +342,11 @@ class GARunner:
         # step 3: run last backward
         backward_inputs = self.args_rets_manager.make_backward_inputs(fwd_outputs)
         torch.cuda.nvtx.range_push("backward")
-        backward_outputs = self.backward_fn(*backward_inputs.dump())
+
+        backward_fn = partial(self.backward_fn, *backward_inputs.dump())
+        del backward_inputs
+        # backward_outputs = self.backward_fn(*backward_inputs.dump())
+        backward_outputs = backward_fn()
         backward_outputs = self.args_rets_manager.make_backward_outputs(
             backward_outputs
         )
@@ -306,7 +355,7 @@ class GARunner:
         # step 4: update_param
         # no need to do it. grad update is done in backward.
         del fwd_outputs
-        del backward_inputs
+        # del backward_inputs
         del backward_outputs
         # gc.collect()
         # torch.cuda.empty_cache()

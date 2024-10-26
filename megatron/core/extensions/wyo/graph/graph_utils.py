@@ -78,15 +78,26 @@ def merge_overlap_comm_greedy(graph0, graph1):
     value_remap = {}
 
     def _is_compute(node):
-        return (not _is_async_comm(node)) and (
-            not _is_wait(node) and (not _is_output(node))
+        return (
+            (not _is_async_comm(node)) 
+            and (not _is_wait(node))
+            and (not _is_output(node))
+            and (not _is_placeholder(node))
         )
 
     def _is_async_comm(node):
         if node.op == "call_function":
             target = node.target
             fn_name = getattr(target, "__name__")
-            return fn_name in ["all_reduce.default", "gather_along_first_dim_in_tp_group.default", "reduce_scatter_along_first_dim_in_tp_group.default"]
+            return fn_name in [
+                "all_reduce.default", 
+                "gather_along_first_dim_in_tp_group.default", 
+                "reduce_scatter_along_first_dim_in_tp_group.default",
+                "all_reduce_in_tp_group",
+                "all_reduce_in_tp_group.default",
+                "all_reduce_in_tp_group_default",
+                "all_reduce_in_tp_group_inplace"
+            ]
         return False
 
     def _is_wait(node):
@@ -98,6 +109,9 @@ def merge_overlap_comm_greedy(graph0, graph1):
 
     def _is_output(node):
         return node.target == "output"
+    
+    def _is_placeholder(node):
+        return node.op=="placeholder"
 
     def _add_node_to(node, graph, value_remap):
         assert not _is_output(node), "Node is output, should not pass in this function!"
@@ -105,7 +119,21 @@ def merge_overlap_comm_greedy(graph0, graph1):
         if value_remap[node].op == "placeholder":
             value_remap[node].target = value_remap[node].name
 
+    # add placeholder
+    for i in range(n_nodes_0):
+        if _is_placeholder(nodes0[i]):
+            _add_node_to(nodes0[i], fused_graph, value_remap)
+    for i in range(n_nodes_1):
+        if _is_placeholder(nodes1[i]):
+            _add_node_to(nodes1[i], fused_graph, value_remap)
+
     while i0 < n_nodes_0 - 1 and i1 < n_nodes_1 - 1:
+        if _is_placeholder(nodes0[i0]):
+            i0 += 1
+            continue
+        if _is_placeholder(nodes1[i1]):
+            i1 += 1
+            continue
         if (_is_compute(nodes0[i0])) and (_is_compute(nodes1[i1])):
             # add graph 0's node to fused_graph until meet comm
             print_rank_0(f"both compute.")
@@ -117,7 +145,7 @@ def merge_overlap_comm_greedy(graph0, graph1):
         elif _is_compute(nodes1[i1]):
             # overlap graph0's communication with graph1's computation, greedy
 
-            assert _is_async_comm(nodes0[i0])
+            assert _is_async_comm(nodes0[i0]), f"{nodes0[i0]=}"
             assert _is_wait(nodes0[i0 + 1])
             print_rank_0(f"nodes0 is comm, nodes1 is compute")
             _add_node_to(nodes0[i0], fused_graph, value_remap)
@@ -204,6 +232,11 @@ def get_shape(node0):
     )
     return meta_val0.shape
 
+def get_fake_tensor(node0):
+    fake_tensor = node0.meta.get(
+        "val", node0.meta.get("tensor_meta", node0.meta.get("example_value", None))
+    )
+    return fake_tensor
 
 def get_alias_union_set(graph):
     class UnionSet:
@@ -253,11 +286,28 @@ def get_alias_union_set(graph):
         """
         if node.op == "call_function":
             if type(node.target) == torch._ops.OpOverload:
-                if node.target.__name__ in ["t.default", "detach.default", "view.default"]:
+                if node.target.__name__ in ["t.default", "detach.default", "view.default", "transpose.int", "unsqueeze.default", "expand.default", "_unsafe_view.default", ""]:
                     return True, 0
-            elif isinstance(node.target, types.FunctionType):
-                if node.target.__name__ in ["async_all_reduce", "wait", "grad_update"]:
+            elif isinstance(node.target, types.FunctionType) and node.target.__name__ in [
+                    "async_all_reduce", 
+                    "all_reduce_in_tp_group_inplace", 
+                    "wait", 
+                    "grad_update",
+                    "wait_tensor",
+                    "move_item"
+                ]:
+                return True, 0
+            elif hasattr(node.target, "__name__") and node.target.__name__=="getitem":
+                getitem_source = node.args[0]
+                getitem_index = node.args[1]
+                if (
+                    hasattr(getitem_source.target, "__name__") 
+                    # and getitem_source.target.__name__ in ["flash_attn.default" ,"layer_norm.default"]
+                    and getitem_index==0
+                ):
                     return True, 0
+                    
+                
 
         _not_alias_node.add(
             (node.op, node.target)
@@ -272,6 +322,11 @@ def get_alias_union_set(graph):
         if is_alias_node:
             alias_union_set.merge(node, node.args[alias_arg_index])
 
+    # print_rank_0("Not alias node:")
+    # for op,target in _not_alias_node:
+    #     print_rank_0(f"{op=}, {target=}")
+
+    # exit()
     return alias_union_set
 
 
@@ -537,6 +592,15 @@ def get_last_placeholder(graph):
             last_placeholder = node
     return last_placeholder
 
+def get_fake_tensor(node0):
+    fake_tensor = node0.meta.get(
+        "val", node0.meta.get("tensor_meta", node0.meta.get("example_value", None))
+    )
+    if isinstance(fake_tensor, tuple) or isinstance(fake_tensor, list):
+        fake_tensor = fake_tensor[0]
+    
+    assert fake_tensor is None or isinstance(fake_tensor, FakeTensor), f"{node0.target=}, {type(fake_tensor)=}"
+    return fake_tensor
 
 def param_grad_update(backward_graph, param_grad_index_in_output: list):
     # get all weight_grads define op
@@ -554,6 +618,9 @@ def param_grad_update(backward_graph, param_grad_index_in_output: list):
                 grad_update, (placeholder_node, param_grads_define_node)
             )
             output_args[param_pos] = grad_update_node
+
+        # placeholder_node.meta["val"] = get_fake_tensor(param_grads_define_node).clone()
+        grad_update_node.meta["val"] = get_fake_tensor(param_grads_define_node).clone()
 
     output_node.args = (output_args,)
 

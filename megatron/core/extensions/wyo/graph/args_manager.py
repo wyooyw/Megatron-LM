@@ -57,10 +57,14 @@ class BackwardInputs:
 
     #     return BackwardInputs(save_for_backwards, output_grads, parameters_grad)
 
-    def dump(self, first_none=True):
+    def dump(self, first_none=True, wrap=True):
         returns = [*self.save_for_backwards, *self.output_grads, *self.parameters_grad]
         if first_none:
             returns = [None, *returns]
+
+        if wrap:
+            returns = [[item,] for item in returns]
+
         return returns
 
     def size_of_save_for_backwards(self):
@@ -90,7 +94,7 @@ class BackwardForwardInputs:
     #     return BackwardForwardInputs(backward_inputs, this_step_forward_inputs)
 
     def dump(self, first_none=True, wrap=True):
-        backward_inputs = self.backward_inputs.dump(first_none=False)
+        backward_inputs = self.backward_inputs.dump(first_none=False, wrap=False)
         forward_inputs = self.forward_inputs.dump(first_none=False)
 
         returns = [*backward_inputs, *forward_inputs]
