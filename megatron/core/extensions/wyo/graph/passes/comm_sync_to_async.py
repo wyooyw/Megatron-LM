@@ -1,6 +1,12 @@
 import torch
 from megatron.core.extensions.wyo.model.communicate.communicate import wait_tensor
 
+def get_fake_tensor(node0):
+    fake_tensor = node0.meta.get(
+        "val", node0.meta.get("tensor_meta", node0.meta.get("example_value", None))
+    )
+    return fake_tensor
+
 def _replace_args(node, old_arg, new_arg):
     args = node.args
     if node.op == "output":
@@ -40,6 +46,9 @@ def _sync_to_async_by_set_kwarg_and_add_wait_op(graph, comm_op_name):
             node_wait = graph.call_function(wait_tensor, args=(new_node,))
             # node_clone = graph.call_function(torch.ops.aten.clone.default, args=(node_wait, ))
 
+        new_node.meta["val"] = get_fake_tensor(node).clone()
+        node_wait.meta["val"] = get_fake_tensor(node).clone()
+        
         # replace
         users = list(node.users.keys())
         for user in users:
@@ -54,5 +63,6 @@ def _sync_to_async_by_set_kwarg_and_add_wait_op(graph, comm_op_name):
 
 def comm_sync_to_async(graph):
     # pass
+    _sync_to_async_by_set_kwarg_and_add_wait_op(graph, "all_reduce_in_tp_group")
     _sync_to_async_by_set_kwarg_and_add_wait_op(graph, "gather_along_first_dim_in_tp_group")
     _sync_to_async_by_set_kwarg_and_add_wait_op(graph, "reduce_scatter_along_first_dim_in_tp_group")

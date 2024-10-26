@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from megatron.core.extensions.wyo.model.communicate.communicate import wait_tensor
 from megatron.core.extensions.wyo.graph.profiler import BasicProfiler
 from torch._subclasses.fake_tensor import FakeTensor
+from megatron.core.extensions.wyo.graph.graph_utils import get_fake_tensor
 class Node:
     def __init__(self, val):
         self.val = val
@@ -85,7 +86,7 @@ class NodeClassifier:
             node.op == "call_function"
             and hasattr(node.target, "_opname")
             and node.target._opname in [
-                "mm", "flash_attn", "flash_attn_bwd"
+                "mm", "flash_attn", "flash_attn_bwd", "vocab_parallel_cross_entropy", "vocab_parallel_cross_entropy_backward"
             ]
         ):
             return True
@@ -921,6 +922,10 @@ def generate_fx_graph_from_super_graph_heads(
         args = [value_remap[arg] for arg in node.args]
         async_comm_node = graph.call_function(node.target, args=tuple(args), kwargs={"async_op": True})
         wait_node = graph.call_function(wait_tensor, args=(async_comm_node,))
+
+        async_comm_node.meta["val"] = get_fake_tensor(node).clone()
+        wait_node.meta["val"] = get_fake_tensor(node).clone()
+
         value_remap[node] = wait_node
         return async_comm_node, wait_node
 
@@ -1222,6 +1227,8 @@ def add_virtual_edges_in_super_graph(super_graph):
         print_rank_0(f"    {node.name=}, {category=}")
         assert category in (0, 6)
 
+    _add_virtual_edges_for_even_overlap(main_road_0, main_road_1)
+
     
     
 
@@ -1326,6 +1333,29 @@ def _add_virtual_edges_in_super_graph(
 
     return new_categories
 
+def _add_virtual_edges_for_even_overlap(
+    main_road_0,
+    main_road_1
+):
+    num_edges = 8
+    size0 = len(main_road_0)
+    size1 = len(main_road_1)
+
+    subsize0 = size0 // num_edges
+    subsize1 = size1 // num_edges
+
+    connect_nodes_0 = []
+    for i in range(0, size0, subsize0):
+        connect_nodes_0.append(main_road_0[i])
+
+    connect_nodes_1 = []
+    for i in range(0, size1, subsize1):
+        connect_nodes_1.append(main_road_1[i])
+
+    # assert len(connect_nodes_0)==len(connect_nodes_1), f"{len(connect_nodes_0)=}, {len(connect_nodes_1)=}"
+
+    for node_0, node_1 in zip(connect_nodes_0, connect_nodes_1):
+        node_1.connect_to(node_0)
 
 def _get_to_main_node(node, nodes_in_main, main_road, from_begin_road):
     # find nearest parent in main
