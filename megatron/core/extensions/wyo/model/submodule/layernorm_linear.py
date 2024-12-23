@@ -341,10 +341,10 @@ class LayerNormColumnParallelLinear(TransformerEngineBaseModule):
 
         self.out_features = divide(output_size, self.tp_size)
         self.in_features = input_size
-
+        
         if init_method is None:
             init_method = get_default_init_method()
-            
+
         self.sequence_parallel = (self.tp_size > 1) and config.sequence_parallel
 
         # prepare device and dtype
@@ -379,10 +379,14 @@ class LayerNormColumnParallelLinear(TransformerEngineBaseModule):
             device=device,
             dtype=params_dtype,
         )
+        get_rng_state_tracker=(
+            get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
+        )
         self.register_parameter(
             fc_weight_name,
             torch.nn.Parameter(fc_weight_tensor),
-            init_fn=init_method
+            init_fn=init_method,
+            get_rng_state_tracker=get_rng_state_tracker
         )
         
         fc_bias_name = "bias"

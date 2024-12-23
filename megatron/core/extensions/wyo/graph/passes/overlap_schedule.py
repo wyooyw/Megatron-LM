@@ -1337,7 +1337,7 @@ def _add_virtual_edges_for_even_overlap(
     main_road_0,
     main_road_1
 ):
-    num_edges = 8
+    num_edges = 20
     size0 = len(main_road_0)
     size1 = len(main_road_1)
 
@@ -1345,17 +1345,18 @@ def _add_virtual_edges_for_even_overlap(
     subsize1 = size1 // num_edges
 
     connect_nodes_0 = []
-    for i in range(0, size0, subsize0):
-        connect_nodes_0.append(main_road_0[i])
+    for i in range(0, size0-subsize0, subsize0):
+        connect_nodes_0.append((main_road_0[i], main_road_0[i+1]))
 
     connect_nodes_1 = []
-    for i in range(0, size1, subsize1):
-        connect_nodes_1.append(main_road_1[i])
+    for i in range(0, size1-subsize1, subsize1):
+        connect_nodes_1.append((main_road_1[i], main_road_1[i+1]))
 
     # assert len(connect_nodes_0)==len(connect_nodes_1), f"{len(connect_nodes_0)=}, {len(connect_nodes_1)=}"
 
-    for node_0, node_1 in zip(connect_nodes_0, connect_nodes_1):
-        node_1.connect_to(node_0)
+    for nodes_0, nodes_1 in zip(connect_nodes_0, connect_nodes_1):
+        nodes_1[0].connect_to(nodes_0[1])
+        nodes_0[0].connect_to(nodes_1[1])
 
 def _get_to_main_node(node, nodes_in_main, main_road, from_begin_road):
     # find nearest parent in main

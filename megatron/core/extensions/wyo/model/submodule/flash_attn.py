@@ -10,6 +10,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     AttnMaskType,
 )
 import flash_attn_2_cuda as flash_attn_cuda
+from megatron.core.extensions.wyo.grad_clip import GradClip
 
 # Use torch.library.custom_op to define a new custom operator.
 # If your operator mutates any input Tensors, their names must be specified
@@ -31,6 +32,7 @@ def flash_attn(q: torch.Tensor,
     rng_state = None
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
+    # print(f"wyo flash_attn {softmax_scale=}, {causal=}, window_size=[-1,0] ")
     # out, q, k, v, out_padded, softmax_lse, S_dmask, rng_state = _flash_attn_forward(
     #     q,
     #     k,
@@ -49,13 +51,13 @@ def flash_attn(q: torch.Tensor,
         q,
         k,
         v,
-        None,
+        None, # out
         None, #alibi_slopes,
         dropout_p,
         softmax_scale,
         causal,
         -1, #window_size[0],
-        -1, #window_size[1],
+        0, #window_size[1],
         return_softmax and dropout_p > 0,
         None,
     )
@@ -107,7 +109,7 @@ def flash_attn_bwd(
         dropout_p,
         softmax_scale,
         causal,
-        (-1, -1), #window_size,
+        (-1, 0), #window_size,
         # 0.0, #softcap
         None, #alibi_slopes,
         deterministic,
@@ -216,6 +218,10 @@ class Attention(nn.Module):
         attn_mask_type,
         packed_seq_params = None,
     ):
+        # query = GradClip.apply(query)
+        # key = GradClip.apply(key)
+        # value = GradClip.apply(value)
+        
         # torch.cuda.nvtx.range_push("Attention")
         query, key, value = [x.transpose(0, 1).contiguous() for x in (query, key, value)]
         out, _, _ =  flash_attn(
@@ -265,7 +271,7 @@ def flash_attn_inplace(q: torch.Tensor,
         softmax_scale,
         causal,
         -1, #window_size[0],
-        -1, #window_size[1],
+        0, #window_size[1],
         return_softmax and dropout_p > 0,
         None,
     )

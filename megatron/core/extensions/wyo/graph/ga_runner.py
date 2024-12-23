@@ -28,6 +28,7 @@ from megatron.core.extensions.wyo.graph.graph_utils import (
     param_grad_update,
 )
 
+# from megatron.core.extensions.wyo.graph.passes.buffer_reuse_legacy import try_reuse_buffer_until_no_change
 from megatron.core.extensions.wyo.graph.passes.buffer_reuse import try_reuse_buffer_until_no_change
 from megatron.core.extensions.wyo.graph.passes.memory_profile import insert_memory_profile
 from megatron.core.extensions.wyo.graph.passes.comm_elimination import comm_elimination
@@ -172,8 +173,8 @@ class GARunner:
         inplace(self.backward_graph)
         comm_sync_to_async(self.backward_graph)
         forbid_reuse_nodes = self._get_forbid_reuse_nodes(backward_only=True)
-        # try_reuse_buffer_until_no_change(self.backward_graph, forbid_reuse_nodes)
-        insert_memory_profile(self.backward_graph, round=128)
+        try_reuse_buffer_until_no_change(self.backward_graph, forbid_reuse_nodes)
+        # insert_memory_profile(self.backward_graph, round=128)
 
         # print_rank_0("Backward reuse finish!")
 

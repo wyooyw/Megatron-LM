@@ -4,7 +4,7 @@
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-GPUS_PER_NODE=8
+GPUS_PER_NODE=2
 # Change for multinode config
 MASTER_ADDR=${MASTER_ADDR:-"localhost"}
 MASTER_PORT=${MASTER_PORT:-"6000"}
@@ -13,7 +13,7 @@ NODE_RANK=${RANK:-"0"}
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 CHECKPOINT_PATH=$1
-TOKENIZER_MODEL=$2
+# TOKENIZER_MODEL=$2
 DATA_PATH=$3
 
 DISTRIBUTED_ARGS=(
@@ -27,9 +27,9 @@ DISTRIBUTED_ARGS=(
 MODEL_ARGS=(
     --use-mcore-models
     --disable-bias-linear
-    --seq-length 4096
+    --seq-length 1024
     --max-position-embeddings 32768
-    --num-layers 32
+    --num-layers 4
     --hidden-size 4096
     --ffn-hidden-size 14336
     --num-attention-heads 32
@@ -61,8 +61,11 @@ MOE_ARGS=(
 DATA_ARGS=(
     --tokenizer-type Llama2Tokenizer
     --tokenizer-model ${TOKENIZER_MODEL}
-    --data-path $DATA_PATH
-    --split 99990,8,2
+    # --data-path $DATA_PATH
+    --mock-data
+    --vocab-file $VOCAB_FILE 
+    --merge-file $MERGE_FILE 
+    # --split 99990,8,2
 )
 
 TRAINING_ARGS=(

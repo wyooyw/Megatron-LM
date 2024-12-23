@@ -2,6 +2,7 @@ from megatron.core.transformer.enums import AttnMaskType
 
 from megatron.core.transformer.attention import SelfAttention as megatron_SelfAttention
 import torch
+from megatron.core.extensions.wyo.grad_clip import GradClip
 
 
 class SelfAttention(megatron_SelfAttention):

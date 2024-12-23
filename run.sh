@@ -1,3 +1,12 @@
+source /cpfs/2926428ee2463e44/user/wangyiou/conda_init.sh
+conda activate deepspeed_megatron
+cd /cpfs/2926428ee2463e44/user/wangyiou/repos/Megatron-LM
+
+export NVTE_FUSED_ATTN=0
+export NVTE_FLASH_ATTN=1
+
+# bash run.sh 
+
 export PYTHONPATH=/cpfs/2926428ee2463e44/user/wangyiou/repos/Megatron-LM:$PYTHONPATH
 
 # bash examples/gpt3/train_gpt3_175b_distributed_pp.sh
@@ -54,4 +63,24 @@ export PYTHONPATH=/cpfs/2926428ee2463e44/user/wangyiou/repos/Megatron-LM:$PYTHON
 
 
 # bash examples/gpt3/train_llama_13b_tp.sh
+
+
+export USE_WYO=1
+export USE_WYO_SCHEDULER=1
+export EXP_NAME=wyo_overlap
 bash examples/gpt3/train_gpt3_13b_tp.sh
+
+export USE_WYO=1
+export USE_WYO_SCHEDULER=0
+export EXP_NAME=wyo
+bash examples/gpt3/train_gpt3_13b_tp.sh
+
+export USE_WYO=0
+export USE_WYO_SCHEDULER=0
+export EXP_NAME=megatron
+bash examples/gpt3/train_gpt3_13b_tp.sh
+
+# export USE_WYO=1
+# export USE_WYO_SCHEDULER=1
+# export EXP_NAME=wyo_overlap
+# bash examples/gpt3/train_gpt3_13b_tp.sh

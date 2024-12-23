@@ -3,7 +3,7 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List, Optional, Union
-
+import os
 import torch
 from torch import Tensor
 
@@ -487,6 +487,12 @@ class TransformerBlock(MegatronModule):
                 )
             else:
                 for l_no, layer in enumerate(self.layers):
+                    # exp_name = os.environ.get("EXP_NAME")
+                    # rank = torch.distributed.get_rank()
+                    # save_dir = f"save_hiddens/{exp_name}/rank{rank}"
+                    # os.makedirs(save_dir, exist_ok=True)
+                    # save_name = f"layer_{l_no}_input.pth"
+                    # torch.save(hidden_states, os.path.join(save_dir, save_name))
                     with self.offload_context:
                         layer.use_cudagraph = True
                         if (len(self.cuda_graphs) == 0) or (not self.training):
@@ -528,7 +534,7 @@ class TransformerBlock(MegatronModule):
                         and self.group_prefetch_offload_commit_async is not None
                     ):
                         hidden_states = self.group_prefetch_offload_commit_async(hidden_states)
-
+        # exit()
         # Final layer norm.
         if self.final_layernorm is not None:
             hidden_states = self.final_layernorm(hidden_states)

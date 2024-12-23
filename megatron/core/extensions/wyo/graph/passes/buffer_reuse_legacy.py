@@ -6,7 +6,6 @@ from megatron.core.extensions.wyo.graph.graph_utils import get_alias_union_set, 
 from megatron.core.extensions.wyo.model.submodule.flash_attn import flash_attn_inplace
 from megatron.core.extensions.wyo.model.operator.te_layernorm import layer_norm_inplace
 from megatron.core.extensions.wyo.model.communicate.communicate import reduce_scatter_along_first_dim_in_tp_group_inplace, gather_along_first_dim_in_tp_group_inplace
-import bisect
 import time
 
 def get_dtype(node0):
@@ -44,105 +43,35 @@ def get_life_time(node, node2line):
     min_life_time = node2line[node]
     max_life_time = node2line[node]
     for user in node.users.keys():
-        # if user not in node2line:
-        #     continue
         line = node2line[user]
         min_life_time = min(min_life_time, line)
         max_life_time = max(max_life_time, line)
     return min_life_time, max_life_time
 
-def _infer_buffer_size(meta_val):
-    if type(meta_val) == FakeTensor:
-        buffer_size = (
-            meta_val.element_size() * meta_val.nelement()
-        )
-    else:
-        buffer_size = None
-    
-    return buffer_size
-
-def _init_first_and_last_alias(alias_nodes, node2line):
-    first_time = None
-    first_node = None
-    last_time = None
-    last_node = None
-
-    for node in alias_nodes:
-        # if node not in self.node2line:
-        #     continue
-        line = node2line[node]
-        min_life_time, max_life_time = get_life_time(node, node2line)
-        if first_time is None or min_life_time <= first_time:
-            first_node = node
-            first_time = min_life_time
-        if last_time is None or max_life_time >= last_time:
-            last_node = node
-            last_time = max_life_time
-    
-    return first_node, last_node, first_time, last_time
-
-    
 class Value:
     def __init__(
         self,
         root_node=None,
         alias_nodes=None,
         node2line=None,
-        first_alias_node=None,
-        last_alias_node=None,
-        life_begin=None,
-        life_end=None,
-        buffer_size=None
     ):
         self.root_node = root_node
-        self.alias_nodes = alias_nodes
+        self.alias_nodes = set(alias_nodes)
         self.node2line = node2line
-        self._first_alias_node = first_alias_node
-        self._last_alias_node = last_alias_node
-        self.life_begin = life_begin
-        self.life_end = life_end
-        self.buffer_size = buffer_size
+        self.meta_val = get_fake_tensor(self.root_node)
+        self._infer_buffer_size()
+        self._init_first_and_last_alias()
 
         self._can_reuse_buffer_of = []
         self._reuse_buffer_of = None
 
-    @staticmethod
-    def init_value(
-        root_node=None,
-        alias_nodes=None,
-        node2line=None
-        ):
-        alias_nodes = set(alias_nodes)
-        meta_val = get_fake_tensor(root_node)
-        buffer_size = _infer_buffer_size(meta_val)
-        first_node,last_node,first_time,life_end = _init_first_and_last_alias(alias_nodes, node2line)
-        return Value(
-            root_node,
-            alias_nodes,
-            node2line=node2line,
-            first_alias_node=first_node,
-            last_alias_node=last_node,
-            life_begin=first_time,
-            life_end=life_end,
-            buffer_size=buffer_size
-        )
-        
-
     def replace_node(self, old_node, new_node):
         if self.root_node==old_node:
             self.root_node = new_node
-        if self._first_alias_node==old_node:
-            self._first_alias_node = new_node
-        if self._last_alias_node==old_node:
-            self._last_alias_node = new_node
-        if old_node in self.node2line:
-            self.node2line[new_node] = self.node2line[old_node]
         assert old_node in self.alias_nodes
         assert new_node not in self.alias_nodes
         self.alias_nodes.remove(old_node)
         self.alias_nodes.add(new_node)
-        
-        
 
     def add_node(self, new_node):
         assert new_node not in self.alias_nodes
@@ -152,36 +81,34 @@ class Value:
         for node in new_nodes:
             self.add_node(node)
 
-    # def _infer_buffer_size(self):
-    #     if type(self.meta_val) == FakeTensor:
-    #         self.buffer_size = (
-    #             self.meta_val.element_size() * self.meta_val.nelement()
-    #         )
-    #     else:
-    #         self.buffer_size = None
+    def _infer_buffer_size(self):
+        if type(self.meta_val) == FakeTensor:
+            self.buffer_size = (
+                self.meta_val.element_size() * self.meta_val.nelement()
+            )
+        else:
+            self.buffer_size = None
 
-    # def _init_first_and_last_alias(self):
-    #     first_time = None
-    #     first_node = None
-    #     last_time = None
-    #     last_node = None
+    def _init_first_and_last_alias(self):
+        first_time = None
+        first_node = None
+        last_time = None
+        last_node = None
 
-    #     for node in self.alias_nodes:
-    #         # if node not in self.node2line:
-    #         #     continue
-    #         line = self.node2line[node]
-    #         min_life_time, max_life_time = get_life_time(node, self.node2line)
-    #         if first_time is None or min_life_time <= first_time:
-    #             first_node = node
-    #             first_time = min_life_time
-    #         if last_time is None or max_life_time >= last_time:
-    #             last_node = node
-    #             last_time = max_life_time
+        for node in self.alias_nodes:
+            line = self.node2line[node]
+            min_life_time, max_life_time = get_life_time(node, self.node2line)
+            if first_time is None or min_life_time <= first_time:
+                first_node = node
+                first_time = min_life_time
+            if last_time is None or max_life_time >= last_time:
+                last_node = node
+                last_time = max_life_time
 
-    #     self._first_alias_node = first_node
-    #     self._last_alias_node = last_node
-    #     self.life_begin = first_time
-    #     self.life_end = last_time
+        self._first_alias_node = first_node
+        self._last_alias_node = last_node
+        self.life_begin = first_time
+        self.life_end = last_time
 
     def is_before_and_disjoint(self, val):
         return self.life_end < val.life_begin
@@ -232,17 +159,7 @@ class ValuesManager:
         root_node = value_formmer.root_node
         alias_nodes = value_formmer.alias_nodes | value_latter.alias_nodes
         node2line = value_formmer.node2line
-        # new_value = Value(root_node, alias_nodes, node2line)
-        new_value = Value(
-            root_node=root_node,
-            alias_nodes=alias_nodes,
-            node2line=node2line,
-            first_alias_node=value_formmer._first_alias_node,
-            last_alias_node=value_latter._last_alias_node,
-            life_begin=value_formmer.life_begin,
-            life_end=value_latter.life_end,
-            buffer_size=value_formmer.buffer_size
-        )
+        new_value = Value(root_node, alias_nodes, node2line)
 
         if change_values:
             self.values.remove(value_formmer)
@@ -316,7 +233,7 @@ class ValuesManager:
         ):
 
             # step 1: merge two value
-            new_value = self.merge_value(value_formmer, value_latter, change_values=False)
+            new_value = self.merge_value(value_formmer, value_latter, change_values=True)
 
             # replace to add.out
             with self.graph.inserting_before(cur_node):
@@ -340,14 +257,139 @@ class ValuesManager:
                 new_value.replace_node(cur_node, inplace_node)
 
             # step 4: update node2line
-            # self.update_node2line()
+            self.update_node2line()
 
             success = True
-            # print("reuse success!")
-            return new_value
+            print("reuse success!")
 
-        return None
+        # if (
+        #     cur_node.op == "call_function"
+        #     and type(cur_node.target) == torch._ops.OpOverload
+        #     and cur_node.target.__name__ == "mm.default"
+        # ):
+        #     # step 1: merge two value
+        #     new_value = self.merge_value(value_formmer, value_latter, change_values=True)
 
+        #     # replace to mm.out
+        #     with self.graph.inserting_before(cur_node):
+
+        #         # step 2: add dtype and view op of the buffer
+        #         added_nodes = self.change_dtype_and_view_for_reuse(reuse_node, cur_node)
+        #         new_value.add_nodes(added_nodes)
+        #         reuse_node = added_nodes[-1]
+
+        #         # step 3: replace cur_node with inplace_node
+        #         inplace_node = self.graph.call_function(
+        #             torch.ops.aten.mm.out, cur_node.args, {"out": reuse_node}
+        #         )
+        #         self.replace_args_of_users(cur_node, inplace_node) # TODO: also replace kwargs
+        #         self.graph.erase_node(cur_node)
+        #         new_value.replace_node(cur_node, inplace_node)
+
+        #     # step 4: update node2line
+        #     self.update_node2line()
+
+        #     success = True
+        #     print("reuse success!")
+
+        # elif (
+        #     cur_node.op == "call_function"
+        #     and type(cur_node.target) == torch._ops.OpOverload
+        #     and cur_node.target.__name__ == "_to_copy.default"
+        # ):
+        #     # step 1: merge two value
+        #     new_value = self.merge_value(value_formmer, value_latter, change_values=True)
+
+        #     # replace to _to_copy.out
+        #     with self.graph.inserting_before(cur_node):
+
+        #         # step 2: add dtype and view op of the buffer
+        #         added_nodes = self.change_dtype_and_view_for_reuse(reuse_node, cur_node)
+        #         new_value.add_nodes(added_nodes)
+        #         reuse_node = added_nodes[-1]
+
+        #         # step 3: replace cur_node with inplace_node
+        #         inplace_node = self.graph.call_function(
+        #             torch.ops.aten._to_copy.out, cur_node.args, {"out": reuse_node}
+        #         )
+        #         self.replace_args_of_users(cur_node, inplace_node) # TODO: also replace kwargs
+        #         self.graph.erase_node(cur_node)
+        #         new_value.replace_node(cur_node, inplace_node)
+
+        #     # step 4: update node2line
+        #     self.update_node2line()
+
+        #     success = True
+        #     print("reuse success!")
+
+        # elif (
+        #     cur_node.op == "call_function"
+        #     and type(cur_node.target) == torch._ops.OpOverload
+        #     and cur_node.target.__name__ == "add.Tensor"
+        # ):
+
+        #     # step 1: merge two value
+        #     new_value = self.merge_value(value_formmer, value_latter, change_values=True)
+
+        #     # replace to add.out
+        #     with self.graph.inserting_before(cur_node):
+
+        #         # step 2: add dtype and view op of the buffer
+        #         added_nodes = self.change_dtype_and_view_for_reuse(reuse_node, cur_node)
+        #         new_value.add_nodes(added_nodes)
+        #         reuse_node = added_nodes[-1]
+
+        #         # step 3: replace cur_node with inplace_node
+        #         inplace_node = self.graph.call_function(
+        #             torch.ops.aten.add.out, cur_node.args, {"out": reuse_node}
+        #         )
+        #         self.replace_args_of_users(cur_node, inplace_node) # TODO: also replace kwargs
+        #         self.graph.erase_node(cur_node)
+        #         new_value.replace_node(cur_node, inplace_node)
+
+        #     # step 4: update node2line
+        #     self.update_node2line()
+
+        #     success = True
+        #     print("reuse success!")
+
+        # elif (
+        #     cur_node.op == "call_function"
+        #     and type(cur_node.target) == torch._ops.OpOverload
+        #     and cur_node.target.__name__ == "clone.default"
+        # ):
+
+        #     # step 1: merge two value
+        #     new_value = self.merge_value(value_formmer, value_latter, change_values=True)
+
+        #     # replace to add.out
+        #     with self.graph.inserting_before(cur_node):
+
+        #         # step 2: add dtype and view op of the buffer
+        #         added_nodes = self.change_dtype_and_view_for_reuse(reuse_node, cur_node)
+        #         new_value.add_nodes(added_nodes)
+        #         reuse_node = added_nodes[-1]
+
+        #         # step 3: replace cur_node with inplace_node
+        #         kwargs = dict(cur_node.kwargs)
+        #         assert "out" not in kwargs
+        #         kwargs["out"] = reuse_node
+        #         inplace_node = self.graph.call_function(
+        #             torch.ops.aten.clone.out, cur_node.args, kwargs
+        #         )
+        #         self.replace_args_of_users(cur_node, inplace_node) # TODO: also replace kwargs
+        #         self.graph.erase_node(cur_node)
+        #         new_value.replace_node(cur_node, inplace_node)
+
+        #     # step 4: update node2line
+        #     self.update_node2line()
+
+        #     success = True
+        #     print("reuse success!")
+        # else:
+        #     print_rank_0(f"Resue fail! {cur_node=}")
+        
+            
         return success
     
     # def try_reuse_buffer(self, forbid_reuse_nodes):
@@ -387,97 +429,45 @@ class ValuesManager:
     def try_reuse_buffer(self, forbid_reuse_nodes, placeholder_only=True):
         has_change = False
 
-        valid_values = [value for value in self.values if not value.contain_one_of(forbid_reuse_nodes)]
-
-        values_sort_by_begin = [*valid_values]
+        values_sort_by_begin = [*self.values]
         values_sort_by_begin.sort(key=lambda x: x.life_begin)
 
-        # values_sort_by_end = [*valid_values]
-        # values_sort_by_end.sort(key=lambda x: x.life_end)
-
-        # preprocess
-        values_sort_by_end_per_buffer_size = dict()
-        for value in valid_values:
-            if placeholder_only and not value.root_node.op=="placeholder":
-                continue
-            buffer_size = value.buffer_size
-            if buffer_size in values_sort_by_end_per_buffer_size:
-                values_sort_by_end_per_buffer_size[buffer_size].append(value)
-            else:
-                values_sort_by_end_per_buffer_size[buffer_size] = [value]
-        for key in values_sort_by_end_per_buffer_size.keys():
-            values_sort_by_end_per_buffer_size[key].sort(key=lambda x: x.life_end)
-
-        
+        values_sort_by_end = [*self.values]
+        values_sort_by_end.sort(key=lambda x: x.life_end)
 
         # self.values.sort(key=lambda x: x.life_end)
         total_values = len(self.values)
-        n_reuse_success = 0
         # find two value that can reuse
         print_rank_0("try_reuse_buffer:")
         for j in range(len(values_sort_by_begin)):
-            vj = self.values[j]
-            if vj.buffer_size not in values_sort_by_end_per_buffer_size:
-                continue
-            values_candidate = values_sort_by_end_per_buffer_size[vj.buffer_size]
-            
-            # find value with biggest end smaller than vj.begin
-            value_reuse_index = bisect.bisect_left(values_candidate, vj.life_begin, key=lambda x: x.life_end)
-            if value_reuse_index==0:
-                continue
-            value_reuse = values_candidate[value_reuse_index-1]
-            
-            disjoint = value_reuse.is_before_and_disjoint(vj)
-            same_buffer_size = value_reuse.is_same_buffer_size(vj)
-            contain_forbid = value_reuse.contain_one_of(forbid_reuse_nodes) or vj.contain_one_of(
-                forbid_reuse_nodes
-            )
-            assert disjoint
-            assert same_buffer_size
-            assert not contain_forbid
+            for i in range(len(values_sort_by_end)-1, -1, -1):
+                vi = self.values[i]
+                vj = self.values[j]
+                if (vj.life_begin - vi.life_end) > 200:
+                    continue
+                if placeholder_only and not vi.root_node.op=="placeholder":
+                    continue
+                disjoint = vi.is_before_and_disjoint(vj)
+                same_buffer_size = vi.is_same_buffer_size(vj)
+                contain_forbid = vi.contain_one_of(forbid_reuse_nodes) or vj.contain_one_of(
+                    forbid_reuse_nodes
+                )
+                if disjoint and same_buffer_size and (not contain_forbid):
+                    # print("Merge two value:")
+                    # print(f"old graph: ")
+                    # print_graph_with_line_index(self.graph)
+                    # vi.show()
+                    # vj.show()
+                    # print_rank_0(f"    {vi.life_end=}, {vj.life_begin=}")
+                    if self.reuse_buffer(vi, vj):
+                        # print(f"new graph: ")
+                        # print_graph_with_line_index(self.graph)
+                        has_change = True
+                        break
 
-            if (vj.life_begin - value_reuse.life_end) > 200:
-                continue
-            # print(f"before {value_reuse in self.values=}")
-            value_merged = self.reuse_buffer(value_reuse, vj)
-            # print(f"after {value_reuse in self.values=}")
-            if value_merged is not None:
-                # delete value_reuse and vj, insert value_merged
-                self.values.remove(value_reuse)
-                self.values.remove(vj)
-                values_candidate.remove(value_reuse)
-                if vj in values_candidate:
-                    values_candidate.remove(vj)
-
-                self.values.append(value_merged)
-                bisect.insort_right(values_candidate, value_merged, key=lambda x: x.life_end)
-
-                # self.update_node2line()
-                
-                has_change = True
-                n_reuse_success += 1
-
-
-            # for i in range(len(values_sort_by_end)-1, -1, -1):
-            #     vi = self.values[i]
-            #     vj = self.values[j]
-            #     if (vj.life_begin - vi.life_end) > 200:
-            #         continue
-            #     if placeholder_only and not vi.root_node.op=="placeholder":
-            #         continue
-            #     disjoint = vi.is_before_and_disjoint(vj)
-            #     same_buffer_size = vi.is_same_buffer_size(vj)
-            #     contain_forbid = vi.contain_one_of(forbid_reuse_nodes) or vj.contain_one_of(
-            #         forbid_reuse_nodes
-            #     )
-            #     if disjoint and same_buffer_size and (not contain_forbid):
-            #         if self.reuse_buffer(vi, vj):
-            #             has_change = True
-            #             break
-
-            # if has_change:
-            #     break
-        return n_reuse_success
+            if has_change:
+                break
+        return has_change
 
 def _get_life_time(node, node2line):
     min_life_time = node2line[node]
@@ -500,7 +490,7 @@ def try_reuse_buffer_until_no_change(graph, forbid_reuse_nodes):
     # get each value's life time
     values = []
     for root, alias_values in alias_union_set.get_all_alias_values():
-        value = Value.init_value(root, alias_values, node2line)
+        value = Value(root, alias_values, node2line)
         values.append(value)
 
     # for value in values:
@@ -513,19 +503,14 @@ def try_reuse_buffer_until_no_change(graph, forbid_reuse_nodes):
     # exit()
     values_manager = ValuesManager(graph, values)
     i = 0
-    while True:
-        n_reuse = values_manager.try_reuse_buffer(forbid_reuse_nodes)
-        if n_reuse==0:
-            break
-        i += n_reuse
+    while values_manager.try_reuse_buffer(forbid_reuse_nodes): 
+        print(f"call try_reuse_buffer: {i}")
+        i += 1
+    # print(f"reuse count: {i}")
+    while values_manager.try_reuse_buffer(forbid_reuse_nodes, placeholder_only=False): 
+        print(f"call try_reuse_buffer: {i}")
+        i += 1
     
-    while True:
-        n_reuse = values_manager.try_reuse_buffer(forbid_reuse_nodes, placeholder_only=False)
-        if n_reuse==0:
-            break
-        i += n_reuse
-
     end_time = time.time()
-
     print_rank_0(f"reuse count: {i}")
     print_rank_0(f"reuse time: {(end_time-begin_time):.3f} s")

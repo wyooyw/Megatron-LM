@@ -15,7 +15,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import make_viewless_tensor
-
+import os
 
 @dataclass
 class TransformerLayerSubmodules:
@@ -75,7 +75,6 @@ class BaseTransformerLayer(ABC):
 
     def __init__(self):
         pass
-
 
 class TransformerLayer(MegatronModule, BaseTransformerLayer):
     """A single transformer layer.
@@ -238,6 +237,15 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         return offset
 
+    def save_hidden(self, name, tensor):
+        pass
+        # exp_name = os.environ.get("EXP_NAME")
+        # rank = torch.distributed.get_rank()
+        # save_dir = f"save_hiddens/{exp_name}/rank{rank}/layer{self.layer_number}"
+        # os.makedirs(save_dir, exist_ok=True)
+        # save_name = f"{name}.pth"
+        # torch.save(tensor, os.path.join(save_dir, save_name))
+
     def forward(
         self,
         hidden_states,
@@ -275,8 +283,12 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         # Residual connection.
         residual = hidden_states
 
+        self.save_hidden("input", hidden_states)
+
         # Optional Input Layer norm
         input_layernorm_output = self.input_layernorm(hidden_states)
+
+        self.save_hidden("input_layernorm_output", input_layernorm_output)
 
         # Self attention.
 
@@ -287,6 +299,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             rotary_pos_emb=rotary_pos_emb,
             packed_seq_params=packed_seq_params,
         )
+        self.save_hidden("attention_output_with_bias", attention_output_with_bias)
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
@@ -322,11 +335,14 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         # Residual connection.
         residual = hidden_states
 
+        self.save_hidden("pre_mlp_layernorm_input", hidden_states)
         # Optional Layer norm post the cross-attention.
         pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+        self.save_hidden("mlp_input", pre_mlp_layernorm_output)
 
         # MLP.
         mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
+        self.save_hidden("mlp_output_with_bias", mlp_output_with_bias)
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?

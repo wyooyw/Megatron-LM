@@ -21,7 +21,7 @@ from megatron.core.utils import divide
 
 from .enums import AttnMaskType
 from .transformer_config import TransformerConfig
-
+import os
 try:
     import transformer_engine  # pylint: disable=unused-import
 
@@ -228,6 +228,14 @@ class Attention(MegatronModule, ABC):
         is "self-attn" or "cross-attn".
         """
 
+    def save_hidden(self, name, tensor):
+        exp_name = os.environ.get("EXP_NAME")
+        rank = torch.distributed.get_rank()
+        save_dir = f"save_hiddens/{exp_name}/rank{rank}/layer{self.layer_number}"
+        os.makedirs(save_dir, exist_ok=True)
+        save_name = f"{name}.pth"
+        torch.save(tensor, os.path.join(save_dir, save_name))
+
     def forward(
         self,
         hidden_states,
@@ -249,6 +257,9 @@ class Attention(MegatronModule, ABC):
         # Get the query, key and value tensors based on the type of attention -
         # self or cross attn.
         query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+        # self.save_hidden("query", query)
+        # self.save_hidden("key", key)
+        # self.save_hidden("value", value)
 
         # ===================================================
         # Adjust key, value, and rotary_pos_emb for inference
@@ -265,6 +276,7 @@ class Attention(MegatronModule, ABC):
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
+        # print(f"{(rotary_pos_emb is not None)=}")
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
@@ -453,7 +465,11 @@ class SelfAttention(Attention):
         Derives `query`, `key` and `value` tensors from `hidden_states`.
         """
         # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
+        # self.save_hidden("sa_hidden_states", hidden_states)
+        # self.save_hidden("sa_qkv_weight", self.linear_qkv.weight)
+        # self.save_hidden("sa_qkv_ln_weight", self.linear_qkv.layer_norm_weight)
         mixed_qkv, _ = self.linear_qkv(hidden_states)
+        # self.save_hidden("mixed_qkv", mixed_qkv)
 
         # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
         new_tensor_shape = mixed_qkv.size()[:-1] + (
@@ -464,6 +480,7 @@ class SelfAttention(Attention):
             ),
         )
         mixed_qkv = mixed_qkv.view(*new_tensor_shape)
+        # self.save_hidden("mixed_qkv_2", mixed_qkv)
 
         split_arg_list = [
             (
@@ -485,6 +502,9 @@ class SelfAttention(Attention):
             # [sq, b, ng, (np/ng + 2) * hn]
             # --> [sq, b, ng, np/ng * hn], [sq, b, ng, hn], [sq, b, ng, hn]
             (query, key, value) = torch.split(mixed_qkv, split_arg_list, dim=3)
+        # self.save_hidden("split_query", query)
+        # self.save_hidden("split_key", key)
+        # self.save_hidden("split_value", value)
 
         # [sq, b, ng, np/ng * hn] -> [sq, b, np, hn]
         query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)

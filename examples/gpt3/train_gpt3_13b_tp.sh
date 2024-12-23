@@ -58,12 +58,12 @@ TRAINING_ARGS=(
     --micro-batch-size $MICRO_BS
     --global-batch-size $GLOBAL_BS
     # --rampup-batch-size 16 16 5859375 
-    --train-iters 16
+    --train-iters 10
     --weight-decay 0.1 
     --adam-beta1 0.9 
     --adam-beta2 0.95 
-    --init-method-std 0.006 
-    --clip-grad 1.0 
+    --init-method-std 0.00006 
+    --clip-grad 1.0
     --bf16
     --lr 6.0e-5 
     --lr-decay-style cosine 
@@ -98,18 +98,18 @@ EVAL_AND_LOGGING_ARGS=(
     # --tensorboard-dir $TENSORBOARD_LOGS_PATH 
 )
 
-# PROFILE=(
-#     --profile
-#     --profile-step-start 5
-#     --profile-step-end 10
-# )
+PROFILE=(
+    --profile
+    --profile-step-start 5
+    --profile-step-end 10
+)
 
 
-# nsys profile -w true -t cuda,nvtx -s cpu  \
-# --capture-range=cudaProfilerApi \
-# --cudabacktrace=true \
-# -x true \
-# -o nsys/llama_tp${GPUS_PER_NODE}_mbs${MICRO_BS}_gbs${GLOBAL_BS}_s${SEQLEN}_${EXP_NAME} \
+nsys profile -w true -t cuda,nvtx -s cpu  \
+--capture-range=cudaProfilerApi \
+--cudabacktrace=true \
+-x true \
+-o nsys/gpt3_13b_tp${GPUS_PER_NODE}_mbs${MICRO_BS}_gbs${GLOBAL_BS}_s${SEQLEN}_${EXP_NAME} \
 torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${GPT_MODEL_ARGS[@]} \
     ${TRAINING_ARGS[@]} \

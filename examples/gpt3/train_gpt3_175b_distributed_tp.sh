@@ -4,7 +4,7 @@
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 # export CUDA_LAUNCH_BLOCKING=1
-GPUS_PER_NODE=2
+GPUS_PER_NODE=8
 # Change for multinode config
 MASTER_ADDR=localhost
 MASTER_PORT=6124
@@ -37,11 +37,11 @@ DISTRIBUTED_ARGS=(
 #     --max-position-embeddings $SEQLEN
 # )
 
-MICRO_BS=10
-GLOBAL_BS=40
+MICRO_BS=32
+GLOBAL_BS=128
 SEQLEN=4096
 GPT_MODEL_ARGS=(
-    --num-layers 8
+    --num-layers 40
     --hidden-size 5120
     --ffn-hidden-size 13824
     --num-attention-heads 40

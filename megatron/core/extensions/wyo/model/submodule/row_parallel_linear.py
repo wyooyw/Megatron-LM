@@ -18,7 +18,7 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_te_version, is_te_min_version
-
+from megatron.core.extensions.wyo.grad_clip import GradClip
 from transformer_engine.pytorch.utils import (
     divide,
     get_default_init_method,
@@ -114,6 +114,8 @@ class RowParallelLinear(TransformerEngineBaseModule):
 
     def forward(self, inp):
         # torch.cuda.nvtx.range_push("wyo RowParallelLinear")
+
+        # inp = GradClip.apply(inp)
 
         # 1.fc
         fc_out = torch.matmul(inp, self.weight.t())

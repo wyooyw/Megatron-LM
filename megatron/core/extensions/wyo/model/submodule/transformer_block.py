@@ -1,9 +1,11 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List, Optional, Union
-
+import os
 import torch
 from torch import Tensor
+import torch.distributed
+from megatron.core.extensions.wyo.grad_clip import GradClip
 
 from megatron.core import InferenceParams, parallel_state, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
@@ -197,6 +199,13 @@ class TransformerBlock(megatron_TransformerBlock):
         #                 hidden_states = self.group_prefetch_offload_commit_async(hidden_states)
 
         for l_no, layer in enumerate(self.layers):
+            # exp_name = os.environ.get("EXP_NAME")
+            # rank = torch.distributed.get_rank()
+            # save_dir = f"save_hiddens/{exp_name}/rank{rank}"
+            # os.makedirs(save_dir, exist_ok=True)
+            # save_name = f"layer_{l_no}_input.pth"
+            # torch.save(hidden_states, os.path.join(save_dir, save_name))
+            hidden_states = GradClip.apply(hidden_states, 0.005)
             hidden_states, context = layer(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -206,6 +215,9 @@ class TransformerBlock(megatron_TransformerBlock):
                 inference_params=inference_params,
                 packed_seq_params=packed_seq_params,
             )
+            
+        
+        # exit()
                     
         # Final layer norm.
         if self.final_layernorm is not None:

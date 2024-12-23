@@ -118,6 +118,57 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
                 rope_scaling=args.use_rope_scaling
             )
 
+    # 定义一个检查NaN的钩子函数
+    def nan_hook_backward(self, grad_in, grad_out):
+        # print(f"{grad_out.max()=}")
+        
+        if not isinstance(grad_out, tuple):
+            grad_out = [grad_out]
+        else:
+            grad_out = grad_out
+
+        if not isinstance(grad_in, tuple):
+            grad_in = [grad_in]
+        else:
+            grad_in = grad_in
+
+        if len(grad_in)==0 or len(grad_out)==0:
+            return
+
+        if isinstance(grad_in[0], torch.Tensor) and isinstance(grad_out[0], torch.Tensor):
+            print_rank_0(f"{self.__class__.__name__} {grad_in[0].max()=},  {grad_out[0].max()=},  diff={grad_out[0].max()-grad_in[0].max()}")
+        
+        # print_rank_0(f"{self.__class__.__name__} ")
+
+        # for i, grad in enumerate(grad_out):
+        #     if not isinstance(grad, torch.Tensor):
+        #         continue
+        #     nan_mask = torch.isnan(grad)
+        #     if nan_mask.any():
+        #         raise RuntimeError(f"In {self.__class__.__name__}, found NAN in output {i} at indices: ",
+        #                             nan_mask.nonzero(), "where:", grad[nan_mask.nonzero()[:, 0].unique(sorted=True)])
+
+    def nan_hook_forward(self, inp, output):
+        if not isinstance(output, tuple):
+            outputs = [output]
+        else:
+            outputs = output
+
+        for i, out in enumerate(outputs):
+            if not isinstance(out, torch.Tensor):
+                continue
+
+            nan_mask = torch.isnan(out)
+            if nan_mask.any():
+                raise RuntimeError(f"In {self.__class__.__name__}, found NAN in output {i} at indices: ",
+                                    nan_mask.nonzero(), "where:", out[nan_mask.nonzero()[:, 0].unique(sorted=True)])
+    # 为模型的每个子模块注册反向钩子
+    def register_hook(module):
+        module.register_forward_hook(nan_hook_forward)
+        module.register_full_backward_hook(nan_hook_backward)
+
+    # model.apply(register_hook)
+
     return model
 
 
